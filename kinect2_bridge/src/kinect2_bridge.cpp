@@ -15,6 +15,7 @@
  * limitations under the License.
  */
 
+
 #include <stdlib.h>
 #include <stdio.h>
 #include <iostream>
@@ -471,10 +472,33 @@ private:
       return false;
     }
 
+    
+
+    std::cout << "PHILLLLLLLLLLLLLLLLL:  serial?" << sensor<<std::endl;
     if(sensor.empty())
     {
       sensor = freenect2.getDefaultDeviceSerialNumber();
     }
+    //PHILLLLL  -- add leading zeros to sensor serial number
+    else
+    {
+
+      int length = 12;//the length a serial number muct be
+      int lengthDiff = length - sensor.length();
+      if(lengthDiff >0){
+        std::string zeros = "0";
+        for(int i=1;i<lengthDiff;i++){
+          zeros += "0";
+        }//end for
+       sensor = zeros + sensor;
+      }//end if length >0    
+    }//end else sensor empty
+    //PHILLLL
+   
+    std::cout << "PHILLLLLLLLLLLLLLLLL:  serial2?" << sensor<<std::endl;
+
+
+
 
     std::cout << "Kinect2 devices found: " << std::endl;
     for(int i = 0; i < numOfDevs; ++i)
