@@ -352,12 +352,16 @@ private:
       switch(mode)
       {
       case COLOR:
+        cv::namedWindow("color", cv::WINDOW_NORMAL);
         cv::imshow("color", colorDisp);
         break;
       case IR:
+        cv::namedWindow("ir", cv::WINDOW_NORMAL);
         cv::imshow("ir", irDisp);
         break;
       case SYNC:
+        cv::namedWindow("color", cv::WINDOW_NORMAL);
+        cv::namedWindow("ir", cv::WINDOW_NORMAL);
         cv::imshow("color", colorDisp);
         cv::imshow("ir", irDisp);
         break;
