@@ -1250,38 +1250,24 @@ void help(const std::string &path)
 
 int main(int argc, char **old_args)
 {
-
-
-
-  for(int i=0;i<argc;i++)
-  {
-    std::cout <<"OLDIES: "<< old_args[i] << std::endl;
-  }
-
   char **argv = new char*[argc + 1];
+  std::cout << "PPHIL  HERE 1" << std::endl;
   for(int argI = 1; argI < argc; ++ argI)
   {
     argv[argI + 1] = old_args[argI];
     
   
+     std::cout << old_args[argI] << std::endl;
   }
   
-  std::cout << "FIRST ARGC: " << argc<< std::endl; 
+   
 
   char defaultParam[sizeof(K2_DEFAULT_NS_PARAM)];
   memcpy(defaultParam, K2_DEFAULT_NS_PARAM, sizeof(K2_DEFAULT_NS_PARAM));
   argv[0] = defaultParam;
   ++argc;
   
-  argv[1] = ""; 
-  std::cout << "SECOND ARGC: " << argc<< std::endl; 
-  for(int i=2;i<argc;i++)
-  {
-    std::cout <<"ARGV: " <<  argv[i] << std::endl;
-  }
-
-
-
+  std::cout << "PPHIL  HERE 3" << std::endl;
   ros::init(argc, argv, "kinect2_bridge");
 
 

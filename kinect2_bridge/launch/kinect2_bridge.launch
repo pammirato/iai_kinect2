@@ -1,6 +1,6 @@
 <launch>
 
-  <arg name="ns"                default="kinect2" />
+  <arg name="ns"                default="$(_base_name)" />
   <arg name="sensor"            default="-1" />
   <arg name="publish_tf"        default="false" />
   <arg name="base_name_tf"      default="$(arg ns)" />
@@ -28,7 +28,7 @@
 
   <group ns="$(arg ns)">
     <node pkg="nodelet" type="nodelet" name="$(arg nodelet_manager)" args="manager"
-          if="$(arg start_manager)" machine="$(arg machine)" output="screen"/>
+          if="$(arg start_manager)" machine="$(arg machine)" output="screen"  />
 
     <node pkg="nodelet" type="nodelet" name="$(arg ns)_bridge" machine="$(arg machine)"
           args="load kinect2_bridge/kinect2_bridge_nodelet $(arg nodelet_manager)"
