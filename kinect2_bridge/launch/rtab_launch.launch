@@ -1,0 +1,9 @@
+<launch>
+  <arg name="publish_frame" default="false" />
+
+  <node name="kinect2_bridge" pkg="kinect2_bridge" type="kinect2_bridge" respawn="true" output="screen">
+      <remap from="/kinect2_head/rgb_rect/image" to="/camera/rgb/image_rect_color"/>
+      <remap from="/kinect2_head/depth_highres/image" to="/camera/depth_registered/image_raw"/>
+      <remap from="/kinect2_head/depth_highres/camera_info" to="/camera/depth_registered/camera_info"/>
+  </node>
+</launch>

@@ -98,7 +98,7 @@ private:
 
 public:
   Receiver(const std::string &topicColor, const std::string &topicDepth, const bool useExact, const bool useCompressed)
-    : topicColor(topicColor), topicDepth(topicDepth), useExact(useExact), useCompressed(useCompressed),
+    : topicColor(topicColor), topicDepth(topicDepth), useExact(useExact), useCompressed(false),
       updateImage(false), updateCloud(false), save(false), running(false), frame(0), queueSize(5),
       nh("~"), spinner(0), it(nh), mode(CLOUD)
   {
