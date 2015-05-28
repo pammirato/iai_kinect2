@@ -312,7 +312,8 @@ private:
     bool foundIr = false;
     bool save = false;
     bool running = true;
-
+    cv::namedWindow("color", cv::WINDOW_NORMAL);
+    cv::namedWindow("ir", cv::WINDOW_NORMAL);
     std::chrono::milliseconds duration(1);
     while(!update && ros::ok())
     {
