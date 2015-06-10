@@ -89,7 +89,7 @@ private:
 
   //PHIL
   int counter=0;
-  std::string savePath = "/home/ammirato/Documents/Kinect/Data/K1/chair1/img";
+  std::string savePath = "/home/ammirato/Documents/Kinect/Data/K1/Test/img";
 
 
   cv::Mat color, depth;
