@@ -44,7 +44,7 @@ endif()
 ## CATKIN_DEPENDS: catkin_packages dependent projects also need
 ## DEPENDS: system dependencies of this project that dependent projects also need
 catkin_package(
-#  INCLUDE_DIRS include
+  INCLUDE_DIRS include
 #  LIBRARIES save_data 
 #  CATKIN_DEPENDS other_catkin_pkg
 #  DEPENDS system_lib
@@ -68,7 +68,7 @@ include_directories(include
   ${PCL_INCLUDE_DIRS}
 )
 
-add_executable(saver src/viewer.cpp)
+add_executable(saver src/service_saver.cpp)
 target_link_libraries(saver
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
