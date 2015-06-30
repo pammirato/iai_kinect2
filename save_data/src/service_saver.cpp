@@ -1,14 +1,31 @@
-// TODO make one callback for rgb, depth and raw_depth, use only one lock
-
-
 #include <ros/ros.h>
 #include <opencv2/highgui/highgui.hpp>
 #include <cv_bridge/cv_bridge.h>
+
+
 #include <std_srvs/Empty.h>
-#include <mutex>
+#include <nav_msgs/Odometry.h>
+
+
+
+//#include <mutex>
+#include <pthread.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <errno.h>
+#include <math.h>
+
+
+#include <iostream>
+#include <limits>
+
+#include <pcl/point_cloud.h>
+#include <pcl/point_types.h>
+#include <pcl/io/pcd_io.h>
+#include <pcl/registration/icp.h>
+#include <pcl/filters/filter.h>
+
+
 
 //#include <ros/spinner.h>
 #include <ros/callback_queue.h>
@@ -27,19 +44,25 @@
 
 #include <kinect2_definitions.h>
 
-/*namespace std
+namespace patch
 {
-    template < typename T > std::string to_string( const T& n ) 
+    template < typename T > std::string to_string( const T& n )
     {
         std::ostringstream stm ;
         stm << n ;
         return stm.str() ;
     }
 }
-*/
+
+
 
   typedef message_filters::sync_policies::ExactTime<sensor_msgs::Image, sensor_msgs::Image,sensor_msgs::Image> ExactSyncPolicy;
 
+pcl::PointCloud<pcl::PointXYZ>::Ptr prev_cloud  (new pcl::PointCloud<pcl::PointXYZ>);
+pcl::PointCloud<pcl::PointXYZ>::Ptr cur_cloud (new pcl::PointCloud<pcl::PointXYZ>);
+
+cv::Mat camera_matrix_rgb;
+cv::Mat lookupX, lookupY;
 
 
 const std::string base_save_path_1 = "/home/ammirato/Documents/Kinect/Data/";
@@ -60,10 +83,10 @@ bool save_images = false;
 bool save_rgb = false;
 bool save_depth = false;
 bool save_raw_depth = false;
-std::mutex lock;
-std::mutex rgb_lock;
-std::mutex depth_lock;
-std::mutex raw_depth_lock;
+
+//std::mutex lock;
+pthread_mutex_t mutex;
+
 cv::Mat rgb;
 cv::Mat depth;
 cv::Mat raw_depth;
@@ -74,6 +97,9 @@ std::vector<int> compression_params;
 image_transport::SubscriberFilter *rgb_filter_sub, *depth_filter_sub, *raw_depth_filter_sub; 
 message_filters::Synchronizer<ExactSyncPolicy> *syncExact;
 
+ros::Subscriber camera_info_sub;
+ros::Subscriber odom_sub;
+
 std::string timestamp_sec;
 std::string timestamp_nsec;
 
@@ -81,11 +107,57 @@ std::string timestamp_nsec;
 bool  saved;
 
 
+
+
+
+void odom_callback(const nav_msgs::Odometry::ConstPtr odom_msg)
+{
+  double x = odom_msg->pose.pose.position.x;
+  double y = odom_msg->pose.pose.position.y;
+  double z = odom_msg->pose.pose.position.z;
+
+  double qx = odom_msg->pose.pose.orientation.x;
+  double qy = odom_msg->pose.pose.orientation.y;
+  double qz = odom_msg->pose.pose.orientation.z;
+  double qw = odom_msg->pose.pose.orientation.w;
+
+
+  ROS_INFO("Poisition(x,y,z): %f, %f, %f\n ", x,y,z);
+
+  ROS_INFO("Quaternion: %f, %f, %f, %f\n",qx,qy,qz,qw);
+  ROS_INFO("Approx Angle: %f\n\n\n",2*acos(qw));
+
+}//odom callback
+
+
+void camera_info_callback(const sensor_msgs::CameraInfo::ConstPtr camera_info_rgb)
+{
+  /*ROS_INFO("INFOR CALLBACK");
+  double *itC = camera_matrix_rgb.ptr<double>(0, 0); 
+  for(size_t i = 0; i < 9; ++i, ++itC)
+  {   
+    *itC = camera_info_rgb->K[i];
+    std::cout << *itC << std::endl;
+  }*/ 
+}//camera info callback
+
+
+
+
+
+
+
+
+
+
+
+
 void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_msgs::Image::ConstPtr depth_msg, const sensor_msgs::Image::ConstPtr raw_depth_msg)
 {
-  ROS_INFO("images -callback");
-  lock.lock();
-  ROS_INFO("images -callback got lock");
+  //ROS_INFO("images -callback");
+  //lock.lock();  
+  pthread_mutex_lock(&mutex);
+  //ROS_INFO("images -callback got lock");
   if(save_images)
   {
     ROS_INFO("SAVE CALLBACK");
@@ -95,8 +167,8 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
       rgb = cv_bridge::toCvShare(rgb_msg, rgb_msg->encoding)->image;
       cv::imshow("rgb",rgb );
       cv::resizeWindow("rgb",432, 768);
-      std::string timestamp_sec =std::to_string(rgb_msg->header.stamp.sec); 
-      std::string timestamp_nsec=std::to_string(rgb_msg->header.stamp.nsec); 
+      std::string timestamp_sec =patch::to_string(rgb_msg->header.stamp.sec); 
+      std::string timestamp_nsec=patch::to_string(rgb_msg->header.stamp.nsec); 
       cv::imwrite(rgb_save_path + timestamp_sec + "_" + timestamp_nsec + image_extension, rgb, compression_params);
       cv::waitKey(30);
     }
@@ -113,8 +185,8 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
       depth = cv_bridge::toCvShare(depth_msg, depth_msg->encoding)->image;
       cv::imshow("depth",depth );
       cv::resizeWindow("depth",432, 768);
-      std::string timestamp_sec =std::to_string(rgb_msg->header.stamp.sec); 
-      std::string timestamp_nsec=std::to_string(rgb_msg->header.stamp.nsec); 
+      std::string timestamp_sec =patch::to_string(rgb_msg->header.stamp.sec); 
+      std::string timestamp_nsec=patch::to_string(rgb_msg->header.stamp.nsec); 
       cv::imwrite(depth_save_path + timestamp_sec + "_" + timestamp_nsec  + image_extension, depth, compression_params);
       cv::waitKey(30);
     }
@@ -130,8 +202,8 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
     {
       //convert message too opencv mat
       raw_depth = cv_bridge::toCvShare(raw_depth_msg, raw_depth_msg->encoding)->image;
-      std::string timestamp_sec =std::to_string(rgb_msg->header.stamp.sec); 
-      std::string timestamp_nsec=std::to_string(rgb_msg->header.stamp.nsec); 
+      std::string timestamp_sec =patch::to_string(rgb_msg->header.stamp.sec); 
+      std::string timestamp_nsec=patch::to_string(rgb_msg->header.stamp.nsec); 
       cv::imwrite(raw_depth_save_path + timestamp_sec + "_" + timestamp_nsec  + image_extension, raw_depth, compression_params);
       cv::waitKey(30);
     }
@@ -143,96 +215,15 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
 
     save_images = false;
   }//if save images
-  lock.unlock();
+  //lock.unlock();
+  pthread_mutex_unlock(&mutex);
+
 
 
 }//callback
 
 
 
-/*
-void rgb_callback(const sensor_msgs::ImageConstPtr& msg)
-{
-  rgb_lock.lock();
-  if(save_rgb)
-  {
-    ROS_INFO("RGB SAVE CALLBACK");
-    try
-    {
-      //convert message too opencv mat
-      rgb = cv_bridge::toCvShare(msg, "bgr8")->image;
-      cv::imshow("rgb",rgb );
-      cv::resizeWindow("rgb",432, 768);
-      
-      cv::imwrite(rgb_save_path + std::to_string(counter) + image_extension, rgb, compression_params);
-      cv::waitKey(30);
-    }
-    catch (cv_bridge::Exception& e)
-    {
-      ROS_ERROR("Could not convert from '%s' to 'bgr8'.", msg->encoding.c_str());
-    }
-    save_rgb = false;
-  }//if save images
-  rgb_lock.unlock();
-}//rgb_callback
-
-
-void depth_callback(const sensor_msgs::ImageConstPtr& msg)
-{
-  depth_lock.lock();
-  if(save_depth)
-  {
-    ROS_INFO("DEPTH SAVE CALLBACK");
-    try
-    {
-      depth = cv_bridge::toCvShare(msg, msg->encoding)->image;
-      cv::imshow("depth",depth );
-      cv::resizeWindow("depth",432, 768);
-      
-      saved = cv::imwrite( depth_save_path + std::to_string(counter) + image_extension, depth, compression_params);
-      cv::waitKey(30);
-      ROS_INFO("saved: %d",saved);
-    }
-    catch (cv_bridge::Exception& e)
-    {
-      ROS_ERROR("Could not convert from '%s' to 'bgr8'.", msg->encoding.c_str());
-    }
-    save_depth = false;
-  }//if save images
-  depth_lock.unlock();
-}//depth_callback
-
-
-
-
-
-void raw_depth_callback(const sensor_msgs::ImageConstPtr& msg)
-{
-  raw_depth_lock.lock();
-  if(save_raw_depth)
-  {
-    ROS_INFO("RAW_DEPTH SAVE CALLBACK");
-    try
-    {
-      raw_depth = cv_bridge::toCvShare(msg, msg->encoding)->image;
-      //cv::imshow("raw_depth",raw_depth );
-      //cv::resizeWindow("raw_depth",216, 384);
-      
-      cv::imwrite(raw_depth_save_path  + std::to_string(counter) + image_extension, raw_depth, compression_params);
-
-      cv::waitKey(30);
-    }
-    catch (cv_bridge::Exception& e)
-    {
-      ROS_ERROR("Could not convert from '%s' to 'bgr8'.", msg->encoding.c_str());
-    }
-    save_raw_depth = false;
-  }//if save images
-  raw_depth_lock.unlock();
-}//raw_depth_callback
-
-
-*/
 
 
 
@@ -245,28 +236,228 @@ void raw_depth_callback(const sensor_msgs::ImageConstPtr& msg)
 
 bool save(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
 {
- /* counter++;
-  ros::Duration(.1).sleep();
-  rgb_lock.lock();
-  depth_lock.lock();
-  raw_depth_lock.lock();
-  ROS_INFO("SERVICE");
-  save_rgb = true;
-  save_depth = true;
-  save_raw_depth = true;
-  raw_depth_lock.unlock();
-  depth_lock.unlock();
-  rgb_lock.unlock();
- */ 
 
-  lock.lock();
+  //lock.lock();
+  pthread_mutex_lock(&mutex);
   save_images = true;
   ros::getGlobalCallbackQueue()->callAvailable(ros::WallDuration(0));
   ROS_INFO("SAVE SERVICE");
-  lock.unlock();
+  //lock.unlock();
+  pthread_mutex_unlock(&mutex);
 
   return true;
 }
+
+
+
+
+
+
+void create_lookup(size_t width, size_t height)
+{
+  const float fx = 1.0f / camera_matrix_rgb.at<double>(0, 0);
+  const float fy = 1.0f / camera_matrix_rgb.at<double>(1, 1);
+  const float cx = camera_matrix_rgb.at<double>(0, 2);
+  const float cy = camera_matrix_rgb.at<double>(1, 2);
+  float *it;
+
+  std::cout << fx << ","<<fy<<","<<cx<<","<<cy<<std::endl;
+
+
+  lookupY = cv::Mat(1, height, CV_32F);
+  it = lookupY.ptr<float>();
+  for(size_t r = 0; r < height; ++r, ++it)
+  {
+    *it = (r - cy) * fy;
+  }
+
+  lookupX = cv::Mat(1, width, CV_32F);
+  it = lookupX.ptr<float>();
+  for(size_t c = 0; c < width; ++c, ++it)
+  {
+    *it = (c - cx) * fx;
+  }
+}
+
+
+
+
+
+void update_cur_cloud()
+{
+
+  cur_cloud->height = rgb.rows;
+  cur_cloud->width = rgb.cols;
+  cur_cloud->is_dense = true;
+  cur_cloud->points.resize(cur_cloud->height * cur_cloud->width);
+  create_lookup(rgb.cols, rgb.rows);
+
+
+  const float badPoint = std::numeric_limits<float>::quiet_NaN();
+  #pragma omp parallel for
+  for(int r = 0; r < depth.rows; ++r)
+  {   
+    pcl::PointXYZ *itP = &cur_cloud->points[r * depth.cols];
+    const uint16_t *itD = depth.ptr<uint16_t>(r); 
+    const cv::Vec3b *itC = rgb.ptr<cv::Vec3b>(r);
+    const float y = lookupY.at<float>(0, r);
+    const float *itX = lookupX.ptr<float>(); 
+
+    for(size_t c = 0; c < (size_t)depth.cols; ++c, ++itP, ++itD, ++itC, ++itX)
+    { 
+      register const float depthValue = *itD / 1000.0f;
+      // Check for invalid measurements
+      /*if(isnan(depthValue) || depthValue <= 0.001)
+      {
+        // not valid
+        //itP->x = itP->y = itP->z = badPoint;
+       // itP->rgba = 0;
+        continue;
+      }*/
+      itP->z = depthValue;
+      itP->x = *itX * depthValue;
+      itP->y = y * depthValue;
+      
+//      std::cout << itP->x << "," << itP->y << "," << itP->z << std::endl;
+      //itP->b = itC->val[0];
+      //itP->g = itC->val[1];
+      //itP->r = itC->val[2];
+      //itP->a = 0;
+    }
+  }//for r
+
+}//make_point_cloud 
+
+
+
+
+
+
+
+
+
+
+void do_icp()
+{
+ 
+  cv::Mat rgb1 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/rgb1.png",CV_LOAD_IMAGE_COLOR);
+  cv::Mat depth1 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/depth1.png",CV_LOAD_IMAGE_ANYDEPTH);
+
+  cv::Mat rgb2 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/rgb2.png",CV_LOAD_IMAGE_COLOR);
+  cv::Mat depth2 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/depth2.png",CV_LOAD_IMAGE_ANYDEPTH);
+
+  cv::Mat rgb3 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/rgb3.png",CV_LOAD_IMAGE_COLOR);
+  cv::Mat depth3 = cv::imread("/home/ammirato/Documents/Kinect/Data/K1/15degTest/depth3.png",CV_LOAD_IMAGE_ANYDEPTH);
+  
+
+  std::cout << "COLS: " << rgb1.cols <<std::endl;
+
+
+  rgb = rgb1;
+  depth = depth1;
+
+  update_cur_cloud();
+
+
+
+/*
+  prev_cloud->height = rgb2.rows;
+  prev_cloud->width = rgb2.cols;
+  prev_cloud->is_dense = true;
+  prev_cloud->points.resize(prev_cloud->height * prev_cloud->width);
+  create_lookup(rgb2.cols, rgb2.rows);
+
+
+  const float badPoint = std::numeric_limits<float>::quiet_NaN();
+  #pragma omp parallel for
+  for(int r = 0; r < depth2.rows; ++r)
+  {   
+    pcl::PointXYZ *itP = &prev_cloud->points[r * depth2.cols];
+    const uint16_t *itD = depth2.ptr<uint16_t>(r); 
+    const cv::Vec3b *itC = rgb2.ptr<cv::Vec3b>(r);
+    const float y = lookupY.at<float>(0, r);
+    const float *itX = lookupX.ptr<float>(); 
+
+    for(size_t c = 0; c < (size_t)depth2.cols; ++c, ++itP, ++itD, ++itC, ++itX)
+    { 
+      register const float depthValue = *itD / 1000.0f;
+      // Check for invalid measurements
+      if(isnan(depthValue) || depthValue <= 0.001)
+      {
+        // not valid
+        //itP->x = itP->y = itP->z = badPoint;
+       // itP->rgba = 0;
+        continue;
+      }
+      itP->z = depthValue;
+      itP->x = *itX * depthValue;
+      itP->y = y * depthValue;
+      
+//      std::cout << itP->x << "," << itP->y << "," << itP->z << std::endl;
+      //itP->b = itC->val[0];
+      //itP->g = itC->val[1];
+      //itP->r = itC->val[2];
+      //itP->a = 0;
+    }
+  }//for r
+
+*/
+
+
+
+
+  
+  std::cout << "CUR W: " << cur_cloud->points.size() << std::endl;
+  std::cout << "PREV W: " << prev_cloud->points.size() << std::endl;
+  
+
+
+  std::vector<int> index; 
+  //pcl::removeNaNFromPointCloud(*prev_cloud,*prev_cloud,index);
+ 
+//  prev_cloud = cur_cloud;
+
+  std::cout << "CUR W: " << cur_cloud->size() << std::endl;
+  std::cout << "PREV W: " << prev_cloud->size() << std::endl;
+
+  pcl::PCDWriter writer;
+  std::cout << writer.writeBinary("./cloud1.pcd", *cur_cloud) << "sdfsd" << std::endl;
+//  writer.writeBinary("/home/ammirato/cloud2.pcd", *prev_cloud);
+
+ // pcl::IterativeClosestPoint<pcl::PointXYZ, pcl::PointXYZ> icp;
+ // icp.setInputSource(prev_cloud);
+ // icp.setInputTarget(cur_cloud);
+
+  //icp.setMaximumIterations (1);
+  //ROS_INFO("CLOUDS SET");
+  //pcl::PointCloud<pcl::PointXYZ> Final;
+//  icp.align(Final);
+  //ROS_INFO("ALIGN DONE");
+  //std::cout << "has converged:" << icp.hasConverged() << " score: " <<
+  //icp.getFitnessScore() << std::endl;
+  //std::cout << icp.getFinalTransformation() << std::endl;
+
+
+
+
+
+
+  //pcl::IterativeClosestPoint<pcl::PointXYZ,pcl::PointXYZ>::Ptr icp (new pcl::IterativeClosestPoint<pcl::PointXYZ,pcl::PointXYZ>);
+//  icp->setMaxCorrespondenceDistance (0.05);
+ // icp->setMaximumIterations (50);
+
+ // pcl::registration::IncrementalICP<pcl::PointXYZ> iicp;  
+  //iicp.setICP (icp);
+
+
+}//do_icp
+
+
+
+
+
+
+
 
 
 int main(int argc, char **argv)
@@ -277,7 +468,6 @@ int main(int argc, char **argv)
   ROS_INFO("name: %s", node_name.c_str());
 */
 
-  
   ros::init(argc, argv, "saver",  ros::init_options::AnonymousName);
 
   ros::NodeHandle nh = ros::NodeHandle("~");
@@ -310,8 +500,6 @@ int main(int argc, char **argv)
 
   image_transport::ImageTransport it(nh);
 
-
-
   image_transport::TransportHints rgb_hints("raw");
   image_transport::TransportHints depth_hints("raw");
   image_transport::TransportHints raw_depth_hints("raw");
@@ -319,6 +507,7 @@ int main(int argc, char **argv)
   std::string rgb_topic = ns + K2_TOPIC_IMAGE_COLOR + K2_TOPIC_RAW;
   std::string depth_topic = ns + K2_TOPIC_HIRES_DEPTH + K2_TOPIC_RAW;
   std::string raw_depth_topic = ns + K2_TOPIC_IMAGE_DEPTH + K2_TOPIC_RAW;
+  std::string camera_info_topic = ns + K2_TOPIC_IMAGE_COLOR + K2_TOPIC_INFO;
   int queue_size = 3;
 
   rgb_filter_sub = new image_transport::SubscriberFilter(it, rgb_topic,queue_size, rgb_hints);
@@ -329,12 +518,37 @@ int main(int argc, char **argv)
   syncExact = new message_filters::Synchronizer<ExactSyncPolicy>(ExactSyncPolicy(queue_size), *rgb_filter_sub, *depth_filter_sub,*raw_depth_filter_sub);
   syncExact->registerCallback(boost::bind(&images_callback, _1, _2 ,_3));
 
-/*
-  image_transport::Subscriber rgb_sub = it.subscribe(ns + K2_TOPIC_IMAGE_COLOR + K2_TOPIC_RAW, 1, rgb_callback);
-  image_transport::Subscriber depth_sub = it.subscribe(ns + K2_TOPIC_HIRES_DEPTH + K2_TOPIC_RAW, 1, depth_callback);
-  image_transport::Subscriber raw_depth_sub = it.subscribe(ns + K2_TOPIC_IMAGE_DEPTH + K2_TOPIC_RAW, 1, raw_depth_callback);
+//  camera_info_sub = nh.subscribe(camera_info_topic, 1, camera_info_callback);
 
+
+  /*std::vector<double> rgb_info_matrix;
+  rgb_info_matrix.push_back(1070);
+  rgb_info_matrix.push_back(0);
+  rgb_info_matrix.push_back(927.269);
+  rgb_info_matrix.push_back(0);
+  rgb_info_matrix.push_back(1069.12);
+  rgb_info_matrix.push_back(545.761);
+  rgb_info_matrix.push_back(0);
+  rgb_info_matrix.push_back(0);
+  rgb_info_matrix.push_back(1);
+  camera_matrix_rgb = cv::Mat::zeros(3, 3, CV_64F);
+  double *itC = camera_matrix_rgb.ptr<double>(0, 0); 
+  for(size_t i = 0; i < 9; ++i, ++itC)
+  {
+    std::cout << "INFOOOOOOOO:   " << rgb_info_matrix.at(i) <<std::endl;   
+    *itC = rgb_info_matrix.at(i);
+  } 
 */
+
+ 
+//  do_icp();
+
+
+  //cloud/icp stuff
+ //   cur_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
+  //  prev_cloud = pcl::PointCloud<pcl::PointXYZ>::Ptr(new pcl::PointCloud<pcl::PointXYZ>());
+
+  odom_sub = nh.subscribe("/rtabmap/odom",1,odom_callback);
 
   ros::ServiceServer service =  nh.advertiseService(ns + "/save_images", save);
 //  ros::AsyncSpinner spinner(4);
@@ -345,6 +559,7 @@ int main(int argc, char **argv)
   } 
   cv::destroyWindow("rgb");
   cv::destroyWindow("depth");
+
   ros::shutdown();
 }
 
