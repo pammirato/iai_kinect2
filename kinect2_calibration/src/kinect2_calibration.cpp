@@ -317,7 +317,8 @@ private:
     std::chrono::milliseconds duration(1);
     while(!update && ros::ok())
     {
-      std::this_thread::sleep_for(duration);
+     // std::this_thread::sleep_for(duration);
+     ros::Duration(.001).sleep(); 
     }
 
     for(; ros::ok() && running;)

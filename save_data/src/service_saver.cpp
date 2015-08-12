@@ -66,7 +66,7 @@ cv::Mat lookupX, lookupY;
 
 
 const std::string base_save_path_1 = "/home/ammirato/Documents/Kinect/Data/";
-const std::string base_save_path_2 = "/SimpleGridMotion/Test/";
+const std::string base_save_path_2 = "/Keyboard/Test/";
 std::string rgb_save_path = "rgb/";
 std::string depth_save_path = "depth/";
 std::string raw_depth_save_path = + "raw_depth/";
@@ -106,6 +106,11 @@ std::string timestamp_nsec;
 
 bool  saved;
 
+double curx = 0;
+double cury = 0;
+double curz = 0;
+double curo = 0;
+
 
 
 
@@ -121,11 +126,17 @@ void odom_callback(const nav_msgs::Odometry::ConstPtr odom_msg)
   double qz = odom_msg->pose.pose.orientation.z;
   double qw = odom_msg->pose.pose.orientation.w;
 
+  curx = x;
+  cury = y;
+  curo = acos(qw) * 180 / M_PI;
 
-  ROS_INFO("Poisition(x,y,z): %f, %f, %f\n ", x,y,z);
 
-  ROS_INFO("Quaternion: %f, %f, %f, %f\n",qx,qy,qz,qw);
-  ROS_INFO("Approx Angle: %f\n\n\n",2*acos(qw));
+  if(qz < 0)
+    curo *= -1;
+//  ROS_INFO("Poisition(x,y,z): %f, %f, %f\n ", x,y,z);
+
+//  ROS_INFO("Quaternion: %f, %f, %f, %f\n",qx,qy,qz,qw);
+//  ROS_INFO("Approx Angle: %f\n\n\n",2*acos(qw));
 
 }//odom callback
 
@@ -169,7 +180,12 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
       cv::resizeWindow("rgb",432, 768);
       std::string timestamp_sec =patch::to_string(rgb_msg->header.stamp.sec); 
       std::string timestamp_nsec=patch::to_string(rgb_msg->header.stamp.nsec); 
-      cv::imwrite(rgb_save_path + timestamp_sec + "_" + timestamp_nsec + image_extension, rgb, compression_params);
+      cv::imwrite(rgb_save_path + timestamp_sec + "_" + timestamp_nsec
+              + "_" + patch::to_string(curx)
+              + "_" + patch::to_string(cury)
+              + "_" + patch::to_string(curz)
+              + "_" + patch::to_string(curo)
+               + image_extension, rgb, compression_params);
       cv::waitKey(30);
     }
     catch (cv_bridge::Exception& e)
@@ -215,6 +231,10 @@ void images_callback(const sensor_msgs::Image::ConstPtr rgb_msg, const sensor_ms
 
     save_images = false;
   }//if save images
+  else
+  {
+    ros::Duration(.1).sleep();
+  }//else not saveimages
   //lock.unlock();
   pthread_mutex_unlock(&mutex);
 
@@ -551,12 +571,18 @@ int main(int argc, char **argv)
   odom_sub = nh.subscribe("/rtabmap/odom",1,odom_callback);
 
   ros::ServiceServer service =  nh.advertiseService(ns + "/save_images", save);
-//  ros::AsyncSpinner spinner(4);
- // spinner.start();
-  //ros::waitForShutdown();
-  while(ros::ok()){
-    ros::spinOnce();
-  } 
+
+  if (pthread_mutex_init(&mutex, NULL) != 0)
+  {
+    printf("\n mutex init failed\n");
+    return 1;
+  }
+
+  //while(ros::ok()){
+  //  ros::spinOnce();
+  //}
+  ros::spin(); 
+
   cv::destroyWindow("rgb");
   cv::destroyWindow("depth");
 

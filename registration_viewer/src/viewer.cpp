@@ -159,7 +159,8 @@ private:
       {
         return;
       }
-      std::this_thread::sleep_for(duration);
+      //std::this_thread::sleep_for(duration);
+      ros::Duration(.001).sleep();
     }
     cloud = pcl::PointCloud<pcl::PointXYZRGBA>::Ptr(new pcl::PointCloud<pcl::PointXYZRGBA>());
     cloud->height = color.rows;

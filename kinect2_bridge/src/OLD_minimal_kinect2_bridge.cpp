@@ -56,7 +56,8 @@ private:
   std::string compression16BitExt, compression16BitString, ns, baseNameTF;
 
   cv::Size sizeColor, sizeIr, sizeLowRes;
-  cv::Mat color, ir, depth;
+  cv::Mat color, depth;
+  //cv::Mat ir;
   cv::Mat cameraMatrixColor, distortionColor, cameraMatrixLowRes, cameraMatrixIr, distortionIr;
   cv::Mat rotation, translation;
   cv::Mat map1Color, map2Color, map1Ir, map2Ir, map1LowRes, map2LowRes;
@@ -76,8 +77,9 @@ private:
 
   ros::NodeHandle nh;
 
-  DepthRegistration *depthRegLowRes, *depthRegHighRes;
-
+  DepthRegistration  *depthRegHighRes;
+//  DepthRegistration *depthRegLowRes;
+ 
   size_t frameColor, frameIrDepth, pubFrameColor, pubFrameIrDepth;
   ros::Time lastColor, lastDepth;
 
@@ -117,13 +119,17 @@ private:
   std::vector<ros::Publisher> imagePubs, compressedPubs, infoPubs;
   std::vector<sensor_msgs::CameraInfo> infos;
 
+
+  ros::Publisher imagePub, infoPub;
+  sensor_msgs::CameraInfo info;
+
 public:
   Kinect2Bridge(const ros::NodeHandle &nh = ros::NodeHandle("~"))
     : sizeColor(1920, 1080), sizeIr(512, 424), sizeLowRes(sizeColor.width / 2, sizeColor.height / 2), nh(nh), frameColor(0), frameIrDepth(0),
       pubFrameColor(0), pubFrameIrDepth(0), lastColor(0, 0), lastDepth(0, 0), nextColor(false), nextIrDepth(false), depthShift(0), running(false)
   {
     color = cv::Mat::zeros(sizeColor, CV_8UC3);
-    ir = cv::Mat::zeros(sizeIr, CV_32F);
+    //ir = cv::Mat::zeros(sizeIr, CV_32F);
     depth = cv::Mat::zeros(sizeIr, CV_32F);
   }
 
@@ -154,10 +160,12 @@ public:
 
     for(; running && ros::ok();)
     {
+      std::cout << "starting main loop 2" << std::endl << std::endl;
       double now = ros::Time::now().toSec();
 
       if(now - fpsTime >= 3.0)
       {
+        std::cout << "starting main loop 3" << std::endl << std::endl;
         fpsTime = now - fpsTime;
         size_t framesIrDepth = frameIrDepth - oldFrameIrDepth;
         size_t framesColor = frameColor - oldFrameColor;
@@ -178,6 +186,7 @@ public:
 
       if(now >= nextFrame)
       {
+        std::cout << "starting main loop 4" << std::endl << std::endl;
         nextColor = true;
         nextIrDepth = true;
         nextFrame += deltaT;
@@ -185,16 +194,20 @@ public:
 
       //std::this_thread::sleep_for(std::chrono::milliseconds(10));
       ros::Duration(.001).sleep();
-    }
+    }//for running
 
+        std::cout << "starting main loop 5a" << std::endl << std::endl;
     for(size_t i = 0; i < threads.size(); ++i)
     {
+        std::cout << "starting main loop 5" << std::endl << std::endl;
       threads[i].join();
     }
     threads.clear();
 
+        std::cout << "starting main loop 6" << std::endl << std::endl;
     if(publishTF)
     {
+        std::cout << "starting main loop 7" << std::endl << std::endl;
       tfPublisher.join();
     }
 
@@ -210,6 +223,7 @@ public:
       infoPubs[i].shutdown();
     }
 
+        std::cout << "starting main loop 8" << std::endl << std::endl;
     nh.shutdown();
   }
 
@@ -299,14 +313,10 @@ private:
     initCompression(jpeg_quality, png_level, use_png);
     initTopics(queueSize);
 
-    ROS_INFO("init done 1");
-
     bool ret = true;
     ret = ret && initPipeline(depth_method, depth_dev, bilateral_filter, edge_aware_filter, minDepth, maxDepth);
-    ROS_INFO("init done 1a");
     ret = ret && initDevice(sensor);
 
-    ROS_INFO("init done 2");
     if(ret)
     {
       initCalibration(calib_path, sensor);
@@ -319,7 +329,6 @@ private:
       createCameraInfo();
     }
 
-    ROS_INFO("init done 3");
     return ret;
   }
 
@@ -355,11 +364,11 @@ private:
       return false;
     }
 
-    depthRegLowRes = DepthRegistration::New(reg);
+    //depthRegLowRes = DepthRegistration::New(reg);
     depthRegHighRes = DepthRegistration::New(reg);
 
     bool ret = true;
-    ret = ret && depthRegLowRes->init(cameraMatrixLowRes, sizeLowRes, cameraMatrixIr, sizeIr, distortionIr, rotation, translation, 0.5f, maxDepth, device);
+    //ret = ret && depthRegLowRes->init(cameraMatrixLowRes, sizeLowRes, cameraMatrixIr, sizeIr, distortionIr, rotation, translation, 0.5f, maxDepth, device);
     ret = ret && depthRegHighRes->init(cameraMatrixColor, sizeColor, cameraMatrixIr, sizeIr, distortionIr, rotation, translation, 0.5f, maxDepth, device);
 
     return ret;
@@ -367,10 +376,8 @@ private:
 
   bool initPipeline(const std::string &method, const int32_t device, const bool bilateral_filter, const bool edge_aware_filter, const double minDepth, const double maxDepth)
   {
-    ROS_INFO("init pipe 1");
     if(method == "default")
     {
-    ROS_INFO("init pipe default");
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #elif defined(LIBFREENECT2_WITH_OPENGL_SUPPORT)
@@ -381,12 +388,10 @@ private:
     }
     else if(method == "cpu")
     {
-    ROS_INFO("init pipe cpu");
       packetPipeline = new libfreenect2::CpuPacketPipeline();
     }
     else if(method == "opencl")
     {
-    ROS_INFO("init pipe opencl");
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #else
@@ -396,7 +401,6 @@ private:
     }
     else if(method == "opengl")
     {
-    ROS_INFO("init pipe openGl");
 #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
       packetPipeline = new libfreenect2::OpenGLPacketPipeline();
 #else
@@ -415,8 +419,6 @@ private:
     config.EnableEdgeAwareFilter = edge_aware_filter;
     config.MinDepth = minDepth;
     config.MaxDepth = maxDepth;
-
-    ROS_INFO("init pipe almost done");
     packetPipeline->getDepthPacketProcessor()->setConfiguration(config);
     return true;
   }
@@ -446,6 +448,7 @@ private:
 
   void initTopics(const int32_t queueSize)
   {
+    /*
     std::vector<std::string> topics(COUNT);
     topics[IR] = K2_TOPIC_IMAGE_IR;
     topics[IR_RECT] = K2_TOPIC_RECT_IR;
@@ -480,7 +483,28 @@ private:
       }
       infoPubs[i] = nh.advertise<sensor_msgs::CameraInfo>(base + topics[i] + K2_TOPIC_INFO, queueSize);
     }
-  }
+    */
+
+
+    imagePubs.resize(COUNT);
+    infoPubs.resize(COUNT);
+    infos.resize(COUNT);
+    
+    const std::string base = "/" + ns;
+   
+    imagePubs[DEPTH] = nh.advertise<sensor_msgs::Image>(base + K2_TOPIC_IMAGE_DEPTH + K2_TOPIC_IMAGE, queueSize);
+  
+    infoPubs[DEPTH] = nh.advertise<sensor_msgs::CameraInfo>(base + K2_TOPIC_IMAGE_DEPTH + K2_TOPIC_INFO, queueSize);
+    
+    imagePubs[DEPTH_HIRES] = nh.advertise<sensor_msgs::Image>(base + K2_TOPIC_HIRES_DEPTH + K2_TOPIC_IMAGE, queueSize);
+  
+    infoPubs[DEPTH_HIRES] = nh.advertise<sensor_msgs::CameraInfo>(base + K2_TOPIC_HIRES_DEPTH + K2_TOPIC_INFO, queueSize);
+    
+    imagePubs[COLOR] = nh.advertise<sensor_msgs::Image>(base + K2_TOPIC_IMAGE_COLOR, queueSize);;
+ 
+    infoPubs[COLOR] = nh.advertise<sensor_msgs::CameraInfo>(base + K2_TOPIC_IMAGE_COLOR + K2_TOPIC_INFO, queueSize);
+  
+  }//init topics
 
   bool initDevice(std::string &sensor)
   {
@@ -916,7 +940,6 @@ private:
       Status s = UNSUBCRIBED;
       if(imagePubs[i].getNumSubscribers() > 0)
       {
-        ROS_INFO("NEW SUBSCRIBER");
         s = RAW;
       }
       if(compressedPubs[i].getNumSubscribers() > 0)
@@ -962,9 +985,10 @@ private:
     }
     if(status[DEPTH_LORES])
     {
-      lockRegLowRes.lock();
-      depthRegLowRes->registerDepth(depthShifted, images[DEPTH_LORES]);
-      lockRegLowRes.unlock();
+      ROS_ERROR("LOW RES DEPTH REGISTRATION ATTEMPTED");
+      //lockRegLowRes.lock();
+      //depthRegLowRes->registerDepth(depthShifted, images[DEPTH_LORES]);
+      //lockRegLowRes.unlock();
     }
     if(status[DEPTH_HIRES])
     {
@@ -1020,23 +1044,18 @@ private:
       switch(status[i])
       {
       case UNSUBCRIBED:
-        //ROS_ERROR("UN %d",i);
         break;
       case RAW:
-        //ROS_ERROR("RAW %d",i);
         createImage(images[i], infoMsgs[i].header, Image(i), imageMsgs[i]);
         break;
       case COMPRESSED:
-        //ROS_ERROR("COMP %d",i);
         createCompressed(images[i], infoMsgs[i].header, Image(i), compressedMsgs[i]);
         break;
       case BOTH:
-        //ROS_ERROR("BOTH %d",i);
         createImage(images[i], infoMsgs[i].header, Image(i), imageMsgs[i]);
         createCompressed(images[i], infoMsgs[i].header, Image(i), compressedMsgs[i]);
         break;
       }
-        //ROS_ERROR("NONE %d",i);
     }
 
     while(frame != pubFrame)
