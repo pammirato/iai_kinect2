@@ -9,7 +9,7 @@
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />
-    <param name="fps_limit"  type="double" value="2" />
+    <param name="fps_limit"  type="double" value="5" />
     
     <param name="publish_tf" type="bool"  value="true"  />
    
@@ -26,7 +26,7 @@
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />
-    <param name="fps_limit"  type="double" value="2" />
+    <param name="fps_limit"  type="double" value="5" />
     
     <param name="publish_tf" type="bool"  value="true"  />
    
@@ -40,7 +40,7 @@
 
     <param name="base_name" type="string"  value="K3"  />
     <param name="sensor" type="double"  value="005845650247"  />
-    <param name="fps_limit"  type="double" value="2" />
+    <param name="fps_limit"  type="double" value="5" />
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />

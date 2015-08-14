@@ -37,6 +37,8 @@
 #include <sensor_msgs/CompressedImage.h>
 #include <sensor_msgs/image_encodings.h>
 
+#include <rtabmap_ros/GetOdom.h>
+
 #include <std_srvs/Empty.h>
 
 #include <tf/transform_broadcaster.h>
@@ -122,6 +124,24 @@ private:
   std::mutex publish_images_lock;
   bool publish_images_flag,publish_images_flag2;
   ros::ServiceServer publish_images_service;
+
+  ros::ServiceClient slam_odom_client;
+  rtabmap_ros::GetOdom slam_odom_srv;
+
+  std::vector<double> current_position;
+
+  enum Position
+  {
+    X=0,
+    Y,
+    Z,
+    ORIENTATION,
+    QX,
+    QY,
+    QZ,
+    QW,
+    POSITION_COUNT
+  };//positin enum
 
 
 
@@ -365,11 +385,16 @@ private:
     }
 
 
-    stop_service = nh.advertiseService("/K1/stop_device", &Kinect2Bridge::stop_device, this);
-    start_service = nh.advertiseService("/K1/start_device", &Kinect2Bridge::start_device, this);
+    stop_service = nh.advertiseService("/"+ns+"/stop_device", &Kinect2Bridge::stop_device, this);
+    start_service = nh.advertiseService("/"+ns+"/start_device", &Kinect2Bridge::start_device, this);
     
-    save_images_service = nh.advertiseService("/K1/save_images", &Kinect2Bridge::save_images, this);
-    publish_images_service = nh.advertiseService("/K1/publish_images", &Kinect2Bridge::publish_images_cb, this);
+    save_images_service = nh.advertiseService("/" + ns + "/save_images", &Kinect2Bridge::save_images, this);
+    publish_images_service = nh.advertiseService("/" + ns + "/publish_images", &Kinect2Bridge::publish_images_cb, this);
+
+    
+    slam_odom_client =nh.serviceClient<rtabmap_ros::GetOdom>("/rtabmap/get_odom");
+
+    current_position = std::vector<double>(POSITION_COUNT, -1); 
 
     //ROS_INFO("init done 3");
     return ret;
@@ -1078,6 +1103,8 @@ private:
     //}
     if(status[DEPTH_HIRES])
     {
+
+      ROS_ERROR("REGISTERING DEPTH!!!!!!");
       lockRegHighRes.lock();
       depthRegHighRes->registerDepth(depthShifted, images[DEPTH_HIRES]);
       lockRegHighRes.unlock();
@@ -1337,6 +1364,56 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
 
 
 
+
+  void update_current_position()
+  {
+
+//    kinect_publish.call(empty_srv); //provide new images for the slam
+   
+    publish_images_helper(); //provide new images for the slam
+    ros::Duration(.5).sleep(); //give slam time to process the new image 
+
+
+    slam_odom_client.call(slam_odom_srv);
+
+
+    double x = slam_odom_srv.response.odom.pose.pose.position.x;
+    double y = slam_odom_srv.response.odom.pose.pose.position.y;
+    double z = slam_odom_srv.response.odom.pose.pose.position.z;
+
+    double qx = slam_odom_srv.response.odom.pose.pose.orientation.x;
+    double qy = slam_odom_srv.response.odom.pose.pose.orientation.y;
+    double qz = slam_odom_srv.response.odom.pose.pose.orientation.z;
+    double qw = slam_odom_srv.response.odom.pose.pose.orientation.w;
+
+    double orientation = 2*acos(qw);
+    if(qz < 0)
+    {
+      orientation *= -1;
+    }     
+
+
+    current_position[X] = x;
+    current_position[Y] = y;
+    current_position[Z] = z;
+    current_position[ORIENTATION] = orientation;
+    
+    //if(true)
+   // {
+      //ROS_INFO("Poisition(x,y,z): %f, %f, %f\n ", x,y,z);
+
+      //ROS_INFO("Quaternion: %f, %f, %f, %f\n",qx,qy,qz,qw);
+      //ROS_INFO("Approx Angle: %f\n\n\n",orientation);
+   // }
+
+  }//update current position 
+
+
+
+
+
+
+
   bool stop_device(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response){
       //ROS_INFO("stop service cb");
       device->pause();
@@ -1352,15 +1429,26 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
 
   bool save_images(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
   {
+
+    update_current_position();
+
+    std::string pos = "_" + std::to_string(current_position[X]) +
+                      "_" + std::to_string(current_position[Y]) + 
+                      "_" + std::to_string(current_position[Z]) + 
+                      "_" + std::to_string(current_position[ORIENTATION]); 
+                        
+
+
+
     //while(!color_save_lock.try_lock());
     //while(!depth_save_lock.try_lock());
     //while(!depth_hires_save_lock.try_lock());
     while(!lockColor.try_lock());
     while(!lockIrDepth.try_lock());
 
-    cv::imwrite(rgb_save_path + std::to_string(counter) + ".png", color_save, compressionParams);  
-    cv::imwrite(depth_save_path + std::to_string(counter) + ".png", depth_hires_save, compressionParams);  
-    cv::imwrite(raw_depth_save_path + std::to_string(counter) + ".png", depth_save, compressionParams);  
+    cv::imwrite(rgb_save_path + std::to_string(counter) + pos + ".png", color_save, compressionParams);  
+    cv::imwrite(depth_save_path + std::to_string(counter) + pos + ".png", depth_hires_save, compressionParams);  
+    cv::imwrite(raw_depth_save_path + std::to_string(counter) + pos + ".png", depth_save, compressionParams);  
 
     std::cerr << "images saved!" << std::endl;
 
@@ -1377,14 +1465,18 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
   
   bool publish_images_cb(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
   {
+    publish_images_helper();
+    return true;
+  }//publish_images_service
+
+  void publish_images_helper()
+  {
     while(! publish_images_lock.try_lock());
     publish_images_flag = true;
     publish_images_flag2 = true;
     //ROS_ERROR("FLAGS TRUE");
     publish_images_lock.unlock(); 
-    return true;
-  }//publish_images_service
-
+  }//publish images helper
 
 
 };//class
