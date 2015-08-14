@@ -16,6 +16,7 @@
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
+    <param name="worker_threads" type="int"  value="2"  />
   </node>
 
   <node pkg="kinect2_bridge" type="minimal_kinect2_bridge" name="K2" >
@@ -32,6 +33,7 @@
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
+    <param name="worker_threads" type="int"  value="2"  />
   </node>
 
   <node pkg="kinect2_bridge" type="minimal_kinect2_bridge" name="K3" >
@@ -48,6 +50,7 @@
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
+    <param name="worker_threads" type="int"  value="2"  />
   </node>
 
 </launch>

@@ -54,15 +54,34 @@
 
 #include <log4cxx/logger.h>
 
+#include <sys/stat.h>
+#include <sys/types.h>
 
 class Kinect2Bridge
 {
 private:
+
+
+  const std::string base_save_path_1 = "/home/ammirato/Documents/Kinect/Data/";
+  const std::string base_save_path_2 = "/Keyboard/Test2/";
+
+  const std::string rgb_save_name =  "rgb";
+  const std::string depth_save_name =  "depth";
+  const std::string raw_depth_save_name= "raw_depth";
+
+  const std::string image_extension = ".png";
+
+  std::string rgb_save_path;
+  std::string depth_save_path;
+  std::string raw_depth_save_path;
+
+
+
   std::vector<int> compressionParams;
   std::string compression16BitExt, compression16BitString, ns, baseNameTF;
 
   cv::Size sizeColor, sizeIr, sizeLowRes;
-  cv::Mat color, ir, depth;
+  cv::Mat color_save, depth_save, depth_hires_save;
   cv::Mat cameraMatrixColor, distortionColor, cameraMatrixLowRes, cameraMatrixIr, distortionIr;
   cv::Mat rotation, translation;
   cv::Mat map1Color, map2Color, map1Ir, map2Ir, map1LowRes, map2LowRes;
@@ -71,6 +90,9 @@ private:
   std::mutex lockIrDepth, lockColor;
   std::mutex lockSync, lockPub, lockTime;
   std::mutex lockRegLowRes, lockRegHighRes;
+
+  std::mutex color_save_lock, depth_save_lock, depth_hires_save_lock;
+
 
   bool publishTF;
   std::thread tfPublisher;
@@ -94,6 +116,15 @@ private:
   ros::ServiceServer stop_service;
   ros::ServiceServer start_service;
   
+  ros::ServiceServer save_images_service;
+  int counter = 0; 
+
+  std::mutex publish_images_lock;
+  bool publish_images_flag,publish_images_flag2;
+  ros::ServiceServer publish_images_service;
+
+
+
   enum Image
   {
 //    IR = 0,
@@ -131,9 +162,12 @@ public:
     : sizeColor(1920, 1080), sizeIr(512, 424), sizeLowRes(sizeColor.width / 2, sizeColor.height / 2), nh(nh), frameColor(0), frameIrDepth(0),
       pubFrameColor(0), pubFrameIrDepth(0), lastColor(0, 0), lastDepth(0, 0), nextColor(false), nextIrDepth(false), depthShift(0), running(false)
   {
-    color = cv::Mat::zeros(sizeColor, CV_8UC3);
-    ir = cv::Mat::zeros(sizeIr, CV_32F);
-    depth = cv::Mat::zeros(sizeIr, CV_32F);
+    color_save = cv::Mat::zeros(sizeColor, CV_8UC3);
+    depth_hires_save = cv::Mat::zeros(sizeColor, CV_32F);
+    depth_save = cv::Mat::zeros(sizeIr, CV_32F);
+  
+    publish_images_flag = false;
+    publish_images_flag2 = false;
   }
 
   void run()
@@ -310,14 +344,14 @@ private:
     initCompression(jpeg_quality, png_level, use_png);
     initTopics(queueSize);
 
-    ROS_INFO("init done 1");
+    //ROS_INFO("init done 1");
 
     bool ret = true;
     ret = ret && initPipeline(depth_method, depth_dev, bilateral_filter, edge_aware_filter, minDepth, maxDepth);
-    ROS_INFO("init done 1a");
+    //ROS_INFO("init done 1a");
     ret = ret && initDevice(sensor);
 
-    ROS_INFO("init done 2");
+    //ROS_INFO("init done 2");
     if(ret)
     {
       initCalibration(calib_path, sensor);
@@ -333,8 +367,11 @@ private:
 
     stop_service = nh.advertiseService("/K1/stop_device", &Kinect2Bridge::stop_device, this);
     start_service = nh.advertiseService("/K1/start_device", &Kinect2Bridge::start_device, this);
+    
+    save_images_service = nh.advertiseService("/K1/save_images", &Kinect2Bridge::save_images, this);
+    publish_images_service = nh.advertiseService("/K1/publish_images", &Kinect2Bridge::publish_images_cb, this);
 
-    ROS_INFO("init done 3");
+    //ROS_INFO("init done 3");
     return ret;
   }
 
@@ -382,10 +419,10 @@ private:
 
   bool initPipeline(const std::string &method, const int32_t device, const bool bilateral_filter, const bool edge_aware_filter, const double minDepth, const double maxDepth)
   {
-    ROS_INFO("init pipe 1");
+    //ROS_INFO("init pipe 1");
     if(method == "default")
     {
-    ROS_INFO("init pipe default");
+    //ROS_INFO("init pipe default");
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #elif defined(LIBFREENECT2_WITH_OPENGL_SUPPORT)
@@ -396,12 +433,12 @@ private:
     }
     else if(method == "cpu")
     {
-    ROS_INFO("init pipe cpu");
+    //ROS_INFO("init pipe cpu");
       packetPipeline = new libfreenect2::CpuPacketPipeline();
     }
     else if(method == "opencl")
     {
-    ROS_INFO("init pipe opencl");
+    //ROS_INFO("init pipe opencl");
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #else
@@ -411,7 +448,7 @@ private:
     }
     else if(method == "opengl")
     {
-    ROS_INFO("init pipe openGl");
+    //ROS_INFO("init pipe openGl");
 #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
       packetPipeline = new libfreenect2::OpenGLPacketPipeline();
 #else
@@ -433,8 +470,22 @@ private:
 
     ROS_WARN("init pipe almost done");
     packetPipeline->getDepthPacketProcessor()->setConfiguration(config);
+
+
+    mkdir((base_save_path_1+ ns + base_save_path_2).c_str(),0777);
+    mkdir((base_save_path_1+ ns + base_save_path_2 + rgb_save_name + "/").c_str(),0777);
+    mkdir((base_save_path_1+ ns + base_save_path_2 + depth_save_name + "/").c_str(),0777);
+    mkdir((base_save_path_1+ ns + base_save_path_2 + raw_depth_save_name + "/").c_str(),0777);
+
+    rgb_save_path = base_save_path_1 +  ns  + base_save_path_2 + rgb_save_name+ "/"+ rgb_save_name;
+    depth_save_path = base_save_path_1 +  ns +  base_save_path_2 + depth_save_name+ "/"+ depth_save_name;
+    raw_depth_save_path = base_save_path_1 +  ns + base_save_path_2 + raw_depth_save_name+ "/" + raw_depth_save_name;
+
+
+
+
     return true;
-  }
+  }//initialize
 
   void initCompression(const int32_t jpegQuality, const int32_t pngLevel, const bool use_png)
   {
@@ -810,6 +861,7 @@ private:
     libfreenect2::FrameMap frames;
     libfreenect2::Frame *irFrame, *depthFrame;
     cv::Mat depth, ir;
+    //cv::Mat ir;
     std_msgs::Header header;
     std::vector<cv::Mat> images(COUNT);
     std::vector<Status> status(COUNT, UNSUBCRIBED);
@@ -830,14 +882,28 @@ private:
     depth = cv::Mat(depthFrame->height, depthFrame->width, CV_32FC1, depthFrame->data);
 
     frame = frameIrDepth++;
-    lockIrDepth.unlock();
+//    lockIrDepth.unlock();
 
     updateStatus(status);
     processIrDepth(ir, depth, images, status);
     listenerIrDepth->release(frames);
 
+    images[DEPTH].copyTo(depth_save);
+    images[DEPTH_HIRES].copyTo(depth_hires_save);
+    //depth.copyTo(depth_save);
+    lockIrDepth.unlock();
     //publishImages(images, header, status, frame, pubFrameIrDepth, IR, COLOR);
-    publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
+    //publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
+
+    while(!publish_images_lock.try_lock());
+    if(publish_images_flag2)
+    {
+      //ROS_ERROR("PUB 2");
+      publish_images_flag2 = false;
+      publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
+    }
+    publish_images_lock.unlock(); 
+    
 
     double elapsed = ros::Time::now().toSec() - now;
     lockTime.lock();
@@ -867,13 +933,27 @@ private:
     color = cv::Mat(colorFrame->height, colorFrame->width, CV_8UC3, colorFrame->data);
 
     frame = frameColor++;
-    lockColor.unlock();
+//    lockColor.unlock();
+
 
     updateStatus(status);
     processColor(color, images, status);
+    //std::cerr << "FARME HEIGHT: " << std::to_string(color.rows) << std::endl;
+    //color = images[COLOR];
+    //std::cerr << "IMAGES COLOR HEIGHT: " << std::to_string(images[COLOR].rows) << "   COLOR: " << std::to_string(COLOR) << std::endl;
+    images[COLOR].copyTo(color_save);
+    //color.copyTo(color_save);
+    lockColor.unlock();
     listenerColor->release(frames);
 
-    publishImages(images, header, status, frame, pubFrameColor, COLOR, COUNT);
+    while(!publish_images_lock.try_lock());
+    if(publish_images_flag)
+    {
+      //ROS_ERROR("PUB 1");
+      publish_images_flag = false;
+      publishImages(images, header, status, frame, pubFrameColor, COLOR, COUNT);
+    }
+    publish_images_lock.unlock(); 
 
     double elapsed = ros::Time::now().toSec() - now;
     lockTime.lock();
@@ -932,11 +1012,18 @@ private:
     for(size_t i = 0; i < COUNT; ++i)
     {
       Status s = UNSUBCRIBED;
-      if(imagePubs[i].getNumSubscribers() > 0)
+      if(imagePubs[i].getNumSubscribers() > 0  || true) //TODO
+    
+      //while(! publish_images_lock.try_lock());
+      //if(publish_images_flag) 
       {
-        ROS_INFO("GOT A SUBSCRIBER!!  %d",i);
+       /// publish_images_flag = false;
+        //ROS_INFO("GOT A SUBSCRIBER!!  %d",i);
         s = RAW;
       }
+      publish_images_lock.unlock();
+
+      
       if(compressedPubs[i].getNumSubscribers() > 0)
       {
         s = s == RAW ? BOTH : COMPRESSED;
@@ -994,6 +1081,8 @@ private:
       lockRegHighRes.lock();
       depthRegHighRes->registerDepth(depthShifted, images[DEPTH_HIRES]);
       lockRegHighRes.unlock();
+
+      //epthShifted.copyTo(depth_hires_save);
     }
   }
 
@@ -1026,6 +1115,8 @@ private:
    // {
    //   cv::cvtColor(images[COLOR_LORES], images[MONO_LORES], CV_BGR2GRAY);
    // }
+
+     
   }//process color
 
   void publishImages(const std::vector<cv::Mat> &images, const std_msgs::Header &header, const std::vector<Status> &status, const size_t frame, size_t &pubFrame, const size_t begin, const size_t end)
@@ -1066,12 +1157,12 @@ private:
       //ROS_INFO("HELLO WORLD");
     }
 
-    /*
-    while(frame != pubFrame)
-    {
+   
+  //  while(frame != pubFrame)
+  //  {
       //std::this_thread::sleep_for(std::chrono::microseconds(100));
-      ros::Duration(.001).sleep();
-    }
+  //    ros::Duration(.001).sleep();
+  //  }
     lockPub.lock();
     for(size_t i = begin; i < end; ++i)
     {
@@ -1100,15 +1191,16 @@ private:
     }
     ++pubFrame;
     lockPub.unlock();
-    */
+    
   }
 
-  void createImage(const cv::Mat &image, const std_msgs::Header &header, const Image type, sensor_msgs::Image &msgImage) const
+  void createImage(const cv::Mat &image, const std_msgs::Header &header, const Image type, sensor_msgs::Image &msgImage) 
   {
     size_t step, size;
     step = image.cols * image.elemSize();
     size = image.rows * step;
 
+    //std::cerr << "Create image" << std::endl;
     switch(type)
     {
     //case IR:
@@ -1116,12 +1208,23 @@ private:
     //  msgImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
     //  break;
     case DEPTH:
+      while(!depth_save_lock.try_lock());
+      image.copyTo(depth_save);
+      depth_save_lock.unlock();
+      msgImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
+      break;
    // case DEPTH_RECT:
    // case DEPTH_LORES:
     case DEPTH_HIRES:
+      while(! depth_hires_save_lock.try_lock());
+      image.copyTo(depth_hires_save);
+      depth_hires_save_lock.unlock();
       msgImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
       break;
     case COLOR:
+      while(!color_save_lock.try_lock());
+      image.copyTo(color_save);
+      color_save_lock.unlock();
     case COLOR_RECT:
     //case COLOR_LORES:
       msgImage.encoding = sensor_msgs::image_encodings::BGR8;
@@ -1235,16 +1338,55 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
 
 
   bool stop_device(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response){
-      ROS_INFO("stop service cb");
+      //ROS_INFO("stop service cb");
       device->pause();
       return true;
   }//stop device
   
-  bool start_device(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response){
-
+  bool start_device(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
+  {
     device->unpause();
     return true;
   }//start device
+  
+
+  bool save_images(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
+  {
+    //while(!color_save_lock.try_lock());
+    //while(!depth_save_lock.try_lock());
+    //while(!depth_hires_save_lock.try_lock());
+    while(!lockColor.try_lock());
+    while(!lockIrDepth.try_lock());
+
+    cv::imwrite(rgb_save_path + std::to_string(counter) + ".png", color_save, compressionParams);  
+    cv::imwrite(depth_save_path + std::to_string(counter) + ".png", depth_hires_save, compressionParams);  
+    cv::imwrite(raw_depth_save_path + std::to_string(counter) + ".png", depth_save, compressionParams);  
+
+    std::cerr << "images saved!" << std::endl;
+
+    counter++;
+    lockIrDepth.unlock();
+    lockColor.unlock();
+    //depth_hires_save_lock.unlock();
+    //depth_save_lock.unlock();
+    //color_save_lock.unlock();
+   
+
+    return true;
+  }//save_images
+  
+  bool publish_images_cb(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
+  {
+    while(! publish_images_lock.try_lock());
+    publish_images_flag = true;
+    publish_images_flag2 = true;
+    //ROS_ERROR("FLAGS TRUE");
+    publish_images_lock.unlock(); 
+    return true;
+  }//publish_images_service
+
+
+
 };//class
 
 class Kinect2BridgeNodelet : public nodelet::Nodelet
