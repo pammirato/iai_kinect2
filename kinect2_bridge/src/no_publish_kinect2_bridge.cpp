@@ -67,6 +67,7 @@ private:
   const std::string base_save_path_1 = "/home/ammirato/Documents/Kinect/Data/";
   const std::string base_save_path_2 = "/Test/";
 
+
   const std::string rgb_save_name =  "rgb";
   const std::string raw_depth_save_name =  "raw_depth";
   const std::string unreg_depth_save_name= "unreg_depth";
@@ -506,7 +507,7 @@ private:
     mkdir((base_save_path_1+ base_save_path_2 + unreg_depth_save_name + "/").c_str(),0777);
 
     rgb_save_path = base_save_path_1 + base_save_path_2 + rgb_save_name+ "/"+ rgb_save_name;
-    raw_depth_save_path =base_save_path_1 + base_save_path_2 + raw_depth_save_name+ "/"+ raw_depth_save_name;
+    raw_depth_save_path = base_save_path_1+ base_save_path_2 + raw_depth_save_name+ "/"+ raw_depth_save_name;
     unreg_depth_save_path = base_save_path_1 + base_save_path_2 + unreg_depth_save_name+ "/" + unreg_depth_save_name;
 
 
@@ -914,9 +915,9 @@ private:
 
     updateStatus(status);
     //processIrDepth(ir, depth, images, status);
-    processIrDepth( depth, images, status);
+    //processIrDepth( depth, images, status);
     //processDepth( depth, images, status);
-    //processDepth(depth,images,status);
+    processDepth(depth,images,status);
     listenerIrDepth->release(frames);
 
 
@@ -941,7 +942,7 @@ private:
  //   }
 
     lockIrDepth.unlock();
-    publishImages(images, header, status, DEPTH, COLOR);
+    //publishImages(images, header, status, DEPTH, COLOR);
     //publishImages(images, header, status, frame, pubFrameIrDepth, IR, COLOR);
     //publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
 
@@ -994,7 +995,7 @@ private:
 
 
     updateStatus(status);
-    processColor(color, images, status);
+    //processColor(color, images, status);
     //std::cerr << "FARME HEIGHT: " << std::to_string(color.rows) << std::endl;
     //color = images[COLOR];
     //std::cerr << "IMAGES COLOR HEIGHT: " << std::to_string(images[COLOR].rows) << "   COLOR: " << std::to_string(COLOR) << std::endl;
@@ -1003,7 +1004,7 @@ private:
     lockColor.unlock();
     listenerColor->release(frames);
 
-    publishImages(images, header, status, COLOR, COUNT);
+    //publishImages(images, header, status, COLOR, COUNT);
     while(!publish_images_lock.try_lock());
     if(publish_images_flag)
     {
@@ -1560,64 +1561,23 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
   bool save_images(std_srvs::Empty::Request& request, std_srvs::Empty::Response& response)
   {
 
-
-    //copy_depth = false;
-    //ros::Duration(1).sleep();
-    //update_current_position();
-
-    
-  //     while(   !  receiveIrDepth() )
-//{
-
-//}
-
-
-
-    //std::string pos = "_" + std::to_string(current_position[X]) +
-     //                 "_" + std::to_string(current_position[Y]) + 
-     //                 "_" + std::to_string(current_position[Z]) + 
-     //                 "_" + std::to_string(current_position[ORIENTATION]); 
-                        
-
-
-    //int i =0;
-    //while(!color_save_lock.try_lock());
-    //while(!depth_save_lock.try_lock());
-    //while(!depth_hires_save_lock.try_lock());
-    while(!lockColor.try_lock());
-    while(!lockIrDepth.try_lock());//{
-    //  std::cerr << "i: " << std::to_string(i++) << std::endl;
-   // }
-    //publish_images_helper();
-    //ros::Duration(.5).sleep();
-    //while(publish_images_flag || publish_images_flag2);
-
-    //std::cerr << "images saving!" << std::endl;
+ //   while(!lockColor.try_lock());
+ //   while(!lockIrDepth.try_lock());//{
 
     std::vector<cv::Mat> images(COUNT);
     std::vector<Status> status(COUNT, UNSUBCRIBED);
     updateStatus(status);
-    processDepthHires(depth_save,images,status);
     processColor(color_save,images,status);
 
 
 
     cv::imwrite(rgb_save_path + std::to_string(counter) + ns + ".png", images[COLOR], compressionParams);  
-    //cv::imwrite(rgb_save_path + std::to_string(counter) + pos + ".png", images[COLOR], compressionParams);  
-    cv::imwrite(raw_depth_save_path + std::to_string(counter) + ns + ".png", images[DEPTH_HIRES], compressionParams);  
-   // cv::imwrite(unreg_depth_save_path + std::to_string(counter) + pos + ".png", images[DEPTH], compressionParams);  
-    //cv::imwrite(depth_save_path + std::to_string(counter) + pos + ".png", depth_hires_save, compressionParams);  
-    cv::imwrite(unreg_depth_save_path + std::to_string(counter) + ns + ".png", depth_save, compressionParams);  
+    cv::imwrite(unreg_depth_save_path + std::to_string(counter) + ns+  ".png", depth_save, compressionParams);  
 
-    //std::cerr << "images saved!" << std::endl;
-  //  copy_depth = true;
     counter++;
-    lockIrDepth.unlock();
-    lockColor.unlock();
-    //depth_hires_save_lock.unlock();
-    //depth_save_lock.unlock();
-    //color_save_lock.unlock();
-   
+ //   lockIrDepth.unlock();
+ //   lockColor.unlock();
+  
 
     return true;
   }//save_images
@@ -1633,7 +1593,7 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
     while(! publish_images_lock.try_lock());
     publish_images_flag = true;
     publish_images_flag2 = true;
-    ROS_ERROR("FLAGS TRUE");
+    //ROS_ERROR("FLAGS TRUE");
     publish_images_lock.unlock(); 
 
 

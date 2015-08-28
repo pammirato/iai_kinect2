@@ -98,6 +98,22 @@ target_link_libraries(minimal_kinect2_bridge
   ${OpenCV_LIBRARIES}
   ${freenect2_LIBRARY}
 )
+
+add_executable(no_publish_kinect2_bridge src/no_publish_kinect2_bridge.cpp)
+target_link_libraries(no_publish_kinect2_bridge
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${freenect2_LIBRARY}
+)
+
+
+add_executable(post_register_depth src/post_register_depth.cpp)
+target_link_libraries(post_register_depth
+  ${catkin_LIBRARIES}
+  ${OpenCV_LIBRARIES}
+  ${freenect2_LIBRARY}
+)
+
 #############
 ## Install ##
 #############

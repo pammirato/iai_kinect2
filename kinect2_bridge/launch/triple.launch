@@ -9,48 +9,48 @@
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />
-    <param name="fps_limit"  type="double" value="5" />
+    <param name="fps_limit"  type="double" value="2" />
     
     <param name="publish_tf" type="bool"  value="true"  />
    
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
-    <param name="worker_threads" type="int"  value="2"  />
+    <param name="worker_threads" type="int"  value="4"  />
   </node>
 
-  <node pkg="kinect2_bridge" type="minimal_kinect2_bridge" name="K2" >
+  <node pkg="kinect2_bridge" type="no_publish_kinect2_bridge" name="K2" >
 
     <param name="base_name" type="string"  value="K2"  />
     <param name="sensor" type="double"  value="005980650247"  />
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />
-    <param name="fps_limit"  type="double" value="5" />
+    <param name="fps_limit"  type="double" value="2" />
     
-    <param name="publish_tf" type="bool"  value="true"  />
+    <param name="publish_tf" type="bool"  value="false"  />
    
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
-    <param name="worker_threads" type="int"  value="2"  />
+    <param name="worker_threads" type="int"  value="4"  />
   </node>
 
-  <node pkg="kinect2_bridge" type="minimal_kinect2_bridge" name="K3" >
+  <node pkg="kinect2_bridge" type="no_publish_kinect2_bridge" name="K3" >
 
     <param name="base_name" type="string"  value="K3"  />
     <param name="sensor" type="double"  value="005845650247"  />
-    <param name="fps_limit"  type="double" value="5" />
+    <param name="fps_limit"  type="double" value="2" />
     
     <param name="reg_method"  type="string" value="cpu"/>
     <param name="depth_method"  type="string" value="opengl" />
     
-    <param name="publish_tf" type="bool"  value="true"  />
+    <param name="publish_tf" type="bool"  value="false"  />
    
 
     <param name="use_png" type="bool"  value="true"  />
     <param name="png_level" type="int"  value="0"  />
-    <param name="worker_threads" type="int"  value="2"  />
+    <param name="worker_threads" type="int"  value="4"  />
   </node>
 
 </launch>
