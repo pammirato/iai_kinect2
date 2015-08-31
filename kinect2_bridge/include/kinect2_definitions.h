@@ -63,4 +63,6 @@
 #define K2_CALIB_FUNDAMENTAL   "fundamental"
 #define K2_CALIB_DEPTH_SHIFT   "depthShift"
 
+#define K2_ROOM_SAVE_NAME "SN20/";
+
 #endif //__KINECT2_DEFINITIONS_H__

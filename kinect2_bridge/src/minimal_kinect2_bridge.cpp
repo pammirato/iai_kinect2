@@ -65,7 +65,7 @@ private:
 
 
   const std::string base_save_path_1 = "/home/ammirato/Documents/Kinect/Data/";
-  const std::string base_save_path_2 = "/Test/";
+  const std::string base_save_path_2 = K2_ROOM_SAVE_NAME;//"/Test/";
 
   const std::string rgb_save_name =  "rgb";
   const std::string raw_depth_save_name =  "raw_depth";
@@ -853,16 +853,22 @@ private:
     for(; running && ros::ok();)
     {
       processedFrame = false;
-
+      //ROS_ERROR("MAIN LOOOOOOOOOOOOOOOOOOP");
       for(size_t i = 0; i < 2; ++i)
       {
+      //ROS_ERROR("HECK first: %d", checkFirst);
         if(i == checkFirst)
         {
-          if(nextIrDepth && lockIrDepth.try_lock())
+         // ROS_ERROR("IIIIIIIIIIIIIIIIIIIIIIIIIN There");
+          if(nextIrDepth && true)//lockIrDepth.try_lock())
           {
             nextIrDepth = false;
             receiveIrDepth();
             processedFrame = true;
+            lockIrDepth.unlock();
+          }
+          else if(nextIrDepth){
+          //ROS_ERROR("next ir Depth trueeeeeeeeeeeeeeeeeeeeeeeeeee");
           }
         }
         else
@@ -886,6 +892,8 @@ private:
 
   bool receiveIrDepth()
   {
+
+    //ROS_ERROR("RECIVE IR DEPTH");
     libfreenect2::FrameMap frames;
     libfreenect2::Frame *irFrame, *depthFrame;
     cv::Mat depth, ir;
@@ -895,6 +903,7 @@ private:
     std::vector<Status> status(COUNT, UNSUBCRIBED);
     size_t frame;
 
+    //ROS_ERROR("RECIVE IR DEPTH wati to reveife");
     if(!receiveFrames(listenerIrDepth, frames))
     {
       return false;
@@ -912,6 +921,7 @@ private:
     frame = frameIrDepth++;
 //    lockIrDepth.unlock();
 
+    //ROS_ERROR("RECIVE IR DEPTH RECEIVEDDD");
     updateStatus(status);
     //processIrDepth(ir, depth, images, status);
     processIrDepth( depth, images, status);
@@ -920,7 +930,8 @@ private:
     listenerIrDepth->release(frames);
 
 
-
+    //ROS_ERROR("RECIVE IR DEPTH PROCESSED");
+    
 
 
 
@@ -942,22 +953,23 @@ private:
 
     lockIrDepth.unlock();
     publishImages(images, header, status, DEPTH, COLOR);
+    //ROS_ERROR("RECIVE IR DEPTH OUBBED");
     //publishImages(images, header, status, frame, pubFrameIrDepth, IR, COLOR);
     //publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
 
-    while(!publish_images_lock.try_lock());
-    if(publish_images_flag2)
-    {
-      ROS_ERROR("PUB 2");
-      publish_images_flag2 = false;
+    //while(!publish_images_lock.try_lock());
+    //if(publish_images_flag2)
+   // {
+    //  ROS_ERROR("PUB 2");
+     // publish_images_flag2 = false;
       //processIrDepth(depth, images, status);
       //processDepthHires(depth, images, status);
       //images[DEPTH].copyTo(depth_save);
       //images[DEPTH_HIRES].copyTo(depth_hires_save);
       //publishImages(images, header, status, frame, pubFrameIrDepth, DEPTH, COLOR);
      // publishImages(images, header, status, DEPTH, COLOR);
-    }
-    publish_images_lock.unlock(); 
+   // }
+   // publish_images_lock.unlock(); 
     
 
     double elapsed = ros::Time::now().toSec() - now;
@@ -1581,11 +1593,8 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
 
 
     //int i =0;
-    //while(!color_save_lock.try_lock());
-    //while(!depth_save_lock.try_lock());
-    //while(!depth_hires_save_lock.try_lock());
-    while(!lockColor.try_lock());
-    while(!lockIrDepth.try_lock());//{
+    //while(!lockColor.try_lock());
+    //while(!lockIrDepth.try_lock());//{
     //  std::cerr << "i: " << std::to_string(i++) << std::endl;
    // }
     //publish_images_helper();
@@ -1612,11 +1621,8 @@ ROS_ERROR("CREATE COMPRESSED CALLED");
     //std::cerr << "images saved!" << std::endl;
   //  copy_depth = true;
     counter++;
-    lockIrDepth.unlock();
-    lockColor.unlock();
-    //depth_hires_save_lock.unlock();
-    //depth_save_lock.unlock();
-    //color_save_lock.unlock();
+  //  lockIrDepth.unlock();
+   // lockColor.unlock();
    
 
     return true;

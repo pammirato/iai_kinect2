@@ -249,7 +249,7 @@ private:
     const int lineText = 1;
     const int font = cv::FONT_HERSHEY_SIMPLEX;
 
-    cv::namedWindow("Image Viewer");
+    cv::namedWindow("Image Viewer", cv::WINDOW_NORMAL);
     oss << "starting...";
 
     start = std::chrono::high_resolution_clock::now();
@@ -534,7 +534,7 @@ int main(int argc, char **argv)
     return 0;
   }
 
-  std::string ns = K2_DEFAULT_NS;
+  std::string ns = "K1";  K2_DEFAULT_NS;
   std::string topicColor = K2_TOPIC_LORES_COLOR K2_TOPIC_RAW;
   std::string topicDepth = K2_TOPIC_LORES_DEPTH K2_TOPIC_RAW;
   bool useExact = true;
