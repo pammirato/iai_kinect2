@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 2.8.3)
-project(kinect2_bridge)
+project(kinect2_bridge CXX)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DBT_USE_DOUBLE_PRECISION -Wall")
 # Unused warnings
@@ -19,17 +19,12 @@ ELSE()
   MESSAGE(ERROR "The compiler ${CMAKE_CXX_COMPILER} has no C++11 support. Please use a different C++ compiler.")
 ENDIF()
 
-find_package(freenect2 REQUIRED)
+find_package(freenect2 REQUIRED HINTS "$ENV{HOME}/freenect2")
 
-find_package(catkin REQUIRED COMPONENTS roscpp rostime std_msgs sensor_msgs nodelet cv_bridge compressed_depth_image_transport depth_registration)
+find_package(catkin REQUIRED COMPONENTS roscpp rostime tf std_msgs sensor_msgs nodelet cv_bridge compressed_depth_image_transport kinect2_registration)
 
 ## System dependencies are found with CMake's conventions
 find_package(OpenCV REQUIRED)
-find_package(OpenMP)
-
-if(OPENMP_FOUND)
-  set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} ${OpenMP_CXX_FLAGS}")
-endif()
 
 ################################################
 ## Declare ROS messages, services and actions ##
@@ -47,7 +42,7 @@ endif()
 catkin_package(
   INCLUDE_DIRS include
 #  LIBRARIES kinect2_bridge
-#  CATKIN_DEPENDS other_catkin_pkg
+  CATKIN_DEPENDS kinect2_registration
 #  DEPENDS system_lib
 )
 
@@ -66,8 +61,9 @@ add_custom_target(additional_files_${PROJECT_NAME}
 
 include_directories(include
   ${catkin_INCLUDE_DIRS}
-  ${OpenCV_INCLUDE_DIR}
+  ${OpenCV_INCLUDE_DIRS}
   ${freenect2_INCLUDE_DIRS}
+  ${kinect2_registration_INCLUDE_DIRS}
 )
 
 if(DEPTH_REG_OPENCL)
@@ -83,6 +79,7 @@ target_link_libraries(kinect2_bridge_nodelet
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
   ${freenect2_LIBRARY}
+  ${kinect2_registration_LIBRARY}
 )
 
 add_executable(kinect2_bridge src/kinect2_bridge.cpp)
@@ -90,28 +87,7 @@ target_link_libraries(kinect2_bridge
   ${catkin_LIBRARIES}
   ${OpenCV_LIBRARIES}
   ${freenect2_LIBRARY}
-)
-
-add_executable(minimal_kinect2_bridge src/minimal_kinect2_bridge.cpp)
-target_link_libraries(minimal_kinect2_bridge
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${freenect2_LIBRARY}
-)
-
-add_executable(no_publish_kinect2_bridge src/no_publish_kinect2_bridge.cpp)
-target_link_libraries(no_publish_kinect2_bridge
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${freenect2_LIBRARY}
-)
-
-
-add_executable(post_register_depth src/post_register_depth.cpp)
-target_link_libraries(post_register_depth
-  ${catkin_LIBRARIES}
-  ${OpenCV_LIBRARIES}
-  ${freenect2_LIBRARY}
+  ${kinect2_registration_LIBRARY}
 )
 
 #############
@@ -129,25 +105,30 @@ target_link_libraries(post_register_depth
 # )
 
 ## Mark executables and/or libraries for installation
-# install(TARGETS kinect2_bridge kinect2_bridge_node
+install(TARGETS kinect2_bridge kinect2_bridge_nodelet
 #   ARCHIVE DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
-#   RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
-# )
+  LIBRARY DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
+  RUNTIME DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
+)
 
 ## Mark cpp header files for installation
-# install(DIRECTORY include/${PROJECT_NAME}/
-#   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
-#   FILES_MATCHING PATTERN "*.h"
-#   PATTERN ".svn" EXCLUDE
-# )
+install(DIRECTORY include/${PROJECT_NAME}/
+  DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION}
+  FILES_MATCHING PATTERN "*.h"
+  PATTERN ".svn" EXCLUDE
+)
 
 ## Mark other files for installation (e.g. launch and bag files, etc.)
-# install(FILES
-#   # myfile1
-#   # myfile2
-#   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
-# )
+install(DIRECTORY
+  launch
+  # myfile2
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
+install(FILES
+  nodelet_plugins.xml
+  # myfile2
+  DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
+)
 
 #############
 ## Testing ##

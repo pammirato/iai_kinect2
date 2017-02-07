@@ -26,6 +26,12 @@
 #include <chrono>
 #include <sys/stat.h>
 
+#if defined(__linux__)
+#include <sys/prctl.h>
+#elif defined(__APPLE__)
+#include <pthread.h>
+#endif
+
 #include <opencv2/opencv.hpp>
 
 #include <ros/ros.h>
@@ -45,36 +51,41 @@
 #include <libfreenect2/frame_listener_impl.h>
 #include <libfreenect2/packet_pipeline.h>
 #include <libfreenect2/config.h>
+#include <libfreenect2/registration.h>
 
-#include <kinect2_definitions.h>
-#include <depth_registration.h>
+#include <kinect2_bridge/kinect2_definitions.h>
+#include <kinect2_registration/kinect2_registration.h>
+#include <kinect2_registration/kinect2_console.h>
 
 class Kinect2Bridge
 {
 private:
   std::vector<int> compressionParams;
-  std::string compression16BitExt, compression16BitString, ns, baseNameTF;
+  std::string compression16BitExt, compression16BitString, baseNameTF;
 
   cv::Size sizeColor, sizeIr, sizeLowRes;
-  cv::Mat color, ir, depth;
-  cv::Mat cameraMatrixColor, distortionColor, cameraMatrixLowRes, cameraMatrixIr, distortionIr;
+  libfreenect2::Frame color;
+  cv::Mat cameraMatrixColor, distortionColor, cameraMatrixLowRes, cameraMatrixIr, distortionIr, cameraMatrixDepth, distortionDepth;
   cv::Mat rotation, translation;
   cv::Mat map1Color, map2Color, map1Ir, map2Ir, map1LowRes, map2LowRes;
 
   std::vector<std::thread> threads;
   std::mutex lockIrDepth, lockColor;
-  std::mutex lockSync, lockPub, lockTime;
-  std::mutex lockRegLowRes, lockRegHighRes;
+  std::mutex lockSync, lockPub, lockTime, lockStatus;
+  std::mutex lockRegLowRes, lockRegHighRes, lockRegSD;
 
   bool publishTF;
-  std::thread tfPublisher;
+  std::thread tfPublisher, mainThread;
 
   libfreenect2::Freenect2 freenect2;
   libfreenect2::Freenect2Device *device;
   libfreenect2::SyncMultiFrameListener *listenerColor, *listenerIrDepth;
   libfreenect2::PacketPipeline *packetPipeline;
+  libfreenect2::Registration *registration;
+  libfreenect2::Freenect2Device::ColorCameraParams colorParams;
+  libfreenect2::Freenect2Device::IrCameraParams irParams;
 
-  ros::NodeHandle nh;
+  ros::NodeHandle nh, priv_nh;
 
   DepthRegistration *depthRegLowRes, *depthRegHighRes;
 
@@ -83,25 +94,28 @@ private:
 
   bool nextColor, nextIrDepth;
   double deltaT, depthShift, elapsedTimeColor, elapsedTimeIrDepth;
-  bool running;
+  bool running, deviceActive, clientConnected;
 
   enum Image
   {
-    IR = 0,
-    IR_RECT,
+    IR_SD = 0,
+    IR_SD_RECT,
 
-    DEPTH,
-    DEPTH_RECT,
-    DEPTH_LORES,
-    DEPTH_HIRES,
+    DEPTH_SD,
+    DEPTH_SD_RECT,
+    DEPTH_HD,
+    DEPTH_QHD,
 
-    COLOR,
-    COLOR_RECT,
-    COLOR_LORES,
+    COLOR_SD_RECT,
+    COLOR_HD,
+    COLOR_HD_RECT,
+    COLOR_QHD,
+    COLOR_QHD_RECT,
 
-    MONO,
-    MONO_RECT,
-    MONO_LORES,
+    MONO_HD,
+    MONO_HD_RECT,
+    MONO_QHD,
+    MONO_QHD_RECT,
 
     COUNT
   };
@@ -114,24 +128,31 @@ private:
     BOTH
   };
 
-  std::vector<ros::Publisher> imagePubs, compressedPubs, infoPubs;
-  std::vector<sensor_msgs::CameraInfo> infos;
+  std::vector<ros::Publisher> imagePubs, compressedPubs;
+  ros::Publisher infoHDPub, infoQHDPub, infoIRPub;
+  sensor_msgs::CameraInfo infoHD, infoQHD, infoIR;
+  std::vector<Status> status;
 
 public:
-  Kinect2Bridge(const ros::NodeHandle &nh = ros::NodeHandle("~"))
-    : sizeColor(1920, 1080), sizeIr(512, 424), sizeLowRes(sizeColor.width / 2, sizeColor.height / 2), nh(nh), frameColor(0), frameIrDepth(0),
-      pubFrameColor(0), pubFrameIrDepth(0), lastColor(0, 0), lastDepth(0, 0), nextColor(false), nextIrDepth(false), depthShift(0), running(false)
+  Kinect2Bridge(const ros::NodeHandle &nh = ros::NodeHandle(), const ros::NodeHandle &priv_nh = ros::NodeHandle("~"))
+    : sizeColor(1920, 1080), sizeIr(512, 424), sizeLowRes(sizeColor.width / 2, sizeColor.height / 2), color(sizeColor.width, sizeColor.height, 4), nh(nh), priv_nh(priv_nh),
+      frameColor(0), frameIrDepth(0), pubFrameColor(0), pubFrameIrDepth(0), lastColor(0, 0), lastDepth(0, 0), nextColor(false),
+      nextIrDepth(false), depthShift(0), running(false), deviceActive(false), clientConnected(false)
   {
-    color = cv::Mat::zeros(sizeColor, CV_8UC3);
-    ir = cv::Mat::zeros(sizeIr, CV_32F);
-    depth = cv::Mat::zeros(sizeIr, CV_32F);
+    status.resize(COUNT, UNSUBCRIBED);
   }
 
-  void run()
+  bool start()
   {
+    if(running)
+    {
+      OUT_ERROR("kinect2_bridge is already running!");
+      return false;
+    }
     if(!initialize())
     {
-      return;
+      OUT_ERROR("Initialization failed!");
+      return false;
     }
     running = true;
 
@@ -145,77 +166,58 @@ public:
       threads[i] = std::thread(&Kinect2Bridge::threadDispatcher, this, i);
     }
 
-    std::cout << "starting main loop" << std::endl << std::endl;
-    double nextFrame = ros::Time::now().toSec() + deltaT;
-    double fpsTime = ros::Time::now().toSec();
-    size_t oldFrameIrDepth = 0, oldFrameColor = 0;
-    nextColor = true;
-    nextIrDepth = true;
+    mainThread = std::thread(&Kinect2Bridge::main, this);
+    return true;
+  }
 
-    for(; running && ros::ok();)
+  void stop()
+  {
+    if(!running)
     {
-      double now = ros::Time::now().toSec();
-
-      if(now - fpsTime >= 3.0)
-      {
-        fpsTime = now - fpsTime;
-        size_t framesIrDepth = frameIrDepth - oldFrameIrDepth;
-        size_t framesColor = frameColor - oldFrameColor;
-        oldFrameIrDepth = frameIrDepth;
-        oldFrameColor = frameColor;
-
-        lockTime.lock();
-        double tColor = elapsedTimeColor;
-        double tDepth = elapsedTimeIrDepth;
-        elapsedTimeColor = 0;
-        elapsedTimeIrDepth = 0;
-        lockTime.unlock();
-
-        std::cout << "[kinect2_bridge] depth processing: ~" << framesIrDepth / tDepth << "Hz (" << (tDepth / framesIrDepth) * 1000 << "ms) publishing rate: ~" << framesIrDepth / fpsTime << "Hz" << std::endl
-                  << "[kinect2_bridge] color processing: ~" << framesColor / tColor << "Hz (" << (tColor / framesColor) * 1000 << "ms) publishing rate: ~" << framesColor / fpsTime << "Hz" << std::endl << std::flush;
-        fpsTime = now;
-      }
-
-      if(now >= nextFrame)
-      {
-        nextColor = true;
-        nextIrDepth = true;
-        nextFrame += deltaT;
-      }
-
-      //std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      ros::Duration(.001).sleep();
+      OUT_ERROR("kinect2_bridge is not running!");
+      return;
     }
+    running = false;
+
+    mainThread.join();
 
     for(size_t i = 0; i < threads.size(); ++i)
     {
       threads[i].join();
     }
-    threads.clear();
 
     if(publishTF)
     {
       tfPublisher.join();
     }
 
-    device->stop();
-    device->close();
+    if(deviceActive && !device->stop())
+    {
+      OUT_ERROR("could not stop device!");
+    }
+
+    if(!device->close())
+    {
+      OUT_ERROR("could not close device!");
+    }
+
     delete listenerIrDepth;
     delete listenerColor;
+    delete registration;
+
+    delete depthRegLowRes;
+    delete depthRegHighRes;
 
     for(size_t i = 0; i < COUNT; ++i)
     {
       imagePubs[i].shutdown();
       compressedPubs[i].shutdown();
-      infoPubs[i].shutdown();
+      infoHDPub.shutdown();
+      infoQHDPub.shutdown();
+      infoIRPub.shutdown();
     }
 
     nh.shutdown();
-  }
-
-  void stop()
-  {
-    running = false;
   }
 
 private:
@@ -224,8 +226,7 @@ private:
     double fps_limit, maxDepth, minDepth;
     bool use_png, bilateral_filter, edge_aware_filter;
     int32_t jpeg_quality, png_level, queueSize, reg_dev, depth_dev, worker_threads;
-    double tmp;
-    std::string depth_method, reg_method, calib_path, sensor;
+    std::string depth_method, reg_method, calib_path, sensor, base_name;
 
     std::string depthDefault = "cpu";
     std::string regDefault = "default";
@@ -236,58 +237,56 @@ private:
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
     depthDefault = "opencl";
 #endif
+#ifdef LIBFREENECT2_WITH_CUDA_SUPPORT
+    depthDefault = "cuda";
+#endif
 #ifdef DEPTH_REG_OPENCL
     regDefault = "opencl";
 #endif
 
-    nh.param("base_name", ns, std::string(K2_DEFAULT_NS));
-    nh.param("sensor", tmp, -1.0);
-    nh.param("fps_limit", fps_limit, -1.0);
-    nh.param("calib_path", calib_path, std::string(K2_CALIB_PATH));
-    nh.param("use_png", use_png, false);
-    nh.param("jpeg_quality", jpeg_quality, 90);
-    nh.param("png_level", png_level, 1);
-    nh.param("depth_method", depth_method, depthDefault);
-    nh.param("depth_device", depth_dev, -1);
-    nh.param("reg_method", reg_method, regDefault);
-    nh.param("reg_devive", reg_dev, -1);
-    nh.param("max_depth", maxDepth, 12.0);
-    nh.param("min_depth", minDepth, 0.1);
-    nh.param("queue_size", queueSize, 1);
-    nh.param("bilateral_filter", bilateral_filter, true);
-    nh.param("edge_aware_filter", edge_aware_filter, true);
-    nh.param("publish_tf", publishTF, false);
-    nh.param("base_name_tf", baseNameTF, ns);
-    nh.param("worker_threads", worker_threads, 4);
-
-    if(tmp > 0)
-    {
-      sensor = std::to_string((uint64_t)tmp);
-    }
+    priv_nh.param("base_name", base_name, std::string(K2_DEFAULT_NS));
+    priv_nh.param("sensor", sensor, std::string(""));
+    priv_nh.param("fps_limit", fps_limit, -1.0);
+    priv_nh.param("calib_path", calib_path, std::string(K2_CALIB_PATH));
+    priv_nh.param("use_png", use_png, false);
+    priv_nh.param("jpeg_quality", jpeg_quality, 90);
+    priv_nh.param("png_level", png_level, 1);
+    priv_nh.param("depth_method", depth_method, depthDefault);
+    priv_nh.param("depth_device", depth_dev, -1);
+    priv_nh.param("reg_method", reg_method, regDefault);
+    priv_nh.param("reg_device", reg_dev, -1);
+    priv_nh.param("max_depth", maxDepth, 12.0);
+    priv_nh.param("min_depth", minDepth, 0.1);
+    priv_nh.param("queue_size", queueSize, 2);
+    priv_nh.param("bilateral_filter", bilateral_filter, true);
+    priv_nh.param("edge_aware_filter", edge_aware_filter, true);
+    priv_nh.param("publish_tf", publishTF, false);
+    priv_nh.param("base_name_tf", baseNameTF, base_name);
+    priv_nh.param("worker_threads", worker_threads, 4);
 
     worker_threads = std::max(1, worker_threads);
     threads.resize(worker_threads);
 
-    std::cout << "parameter:" << std::endl
-              << "        base_name: " << ns << std::endl
-              << "           sensor: " << sensor << std::endl
-              << "        fps_limit: " << fps_limit << std::endl
-              << "       calib_path: " << calib_path << std::endl
-              << "          use_png: " << (use_png ? "true" : "false") << std::endl
-              << "     jpeg_quality: " << jpeg_quality << std::endl
-              << "        png_level: " << png_level << std::endl
-              << "     depth_method: " << depth_method << std::endl
-              << "     depth_device: " << depth_dev << std::endl
-              << "       reg_method: " << reg_method << std::endl
-              << "       reg_devive: " << reg_dev << std::endl
-              << "        max_depth: " << maxDepth << std::endl
-              << "        min_depth: " << minDepth << std::endl
-              << "       queue_size: " << queueSize << std::endl
-              << " bilateral_filter: " << (bilateral_filter ? "true" : "false") << std::endl
-              << "edge_aware_filter: " << (edge_aware_filter ? "true" : "false") << std::endl
-              << "       publish_tf: " << (publishTF ? "true" : "false") << std::endl
-              << "     base_name_tf: " << baseNameTF << std::endl
-              << "   worker_threads: " << worker_threads << std::endl << std::endl;
+    OUT_INFO("parameter:" << std::endl
+             << "        base_name: " FG_CYAN << base_name << NO_COLOR << std::endl
+             << "           sensor: " FG_CYAN << (sensor.empty() ? "default" : sensor) << NO_COLOR << std::endl
+             << "        fps_limit: " FG_CYAN << fps_limit << NO_COLOR << std::endl
+             << "       calib_path: " FG_CYAN << calib_path << NO_COLOR << std::endl
+             << "          use_png: " FG_CYAN << (use_png ? "true" : "false") << NO_COLOR << std::endl
+             << "     jpeg_quality: " FG_CYAN << jpeg_quality << NO_COLOR << std::endl
+             << "        png_level: " FG_CYAN << png_level << NO_COLOR << std::endl
+             << "     depth_method: " FG_CYAN << depth_method << NO_COLOR << std::endl
+             << "     depth_device: " FG_CYAN << depth_dev << NO_COLOR << std::endl
+             << "       reg_method: " FG_CYAN << reg_method << NO_COLOR << std::endl
+             << "       reg_device: " FG_CYAN << reg_dev << NO_COLOR << std::endl
+             << "        max_depth: " FG_CYAN << maxDepth << NO_COLOR << std::endl
+             << "        min_depth: " FG_CYAN << minDepth << NO_COLOR << std::endl
+             << "       queue_size: " FG_CYAN << queueSize << NO_COLOR << std::endl
+             << " bilateral_filter: " FG_CYAN << (bilateral_filter ? "true" : "false") << NO_COLOR << std::endl
+             << "edge_aware_filter: " FG_CYAN << (edge_aware_filter ? "true" : "false") << NO_COLOR << std::endl
+             << "       publish_tf: " FG_CYAN << (publishTF ? "true" : "false") << NO_COLOR << std::endl
+             << "     base_name_tf: " FG_CYAN << baseNameTF << NO_COLOR << std::endl
+             << "   worker_threads: " FG_CYAN << worker_threads << NO_COLOR);
 
     deltaT = fps_limit > 0 ? 1.0 / fps_limit : 0.0;
 
@@ -297,30 +296,36 @@ private:
     }
 
     initCompression(jpeg_quality, png_level, use_png);
-    initTopics(queueSize);
 
-    ROS_INFO("init done 1");
-
-    bool ret = true;
-    ret = ret && initPipeline(depth_method, depth_dev, bilateral_filter, edge_aware_filter, minDepth, maxDepth);
-    ROS_INFO("init done 1a");
-    ret = ret && initDevice(sensor);
-
-    ROS_INFO("init done 2");
-    if(ret)
+    if(!initPipeline(depth_method, depth_dev))
     {
-      initCalibration(calib_path, sensor);
+      return false;
     }
 
-    ret = ret && initRegistration(reg_method, reg_dev, maxDepth);
-
-    if(ret)
+    if(!initDevice(sensor))
     {
-      createCameraInfo();
+      return false;
     }
 
-    ROS_INFO("init done 3");
-    return ret;
+    initConfig(bilateral_filter, edge_aware_filter, minDepth, maxDepth);
+
+    initCalibration(calib_path, sensor);
+
+    if(!initRegistration(reg_method, reg_dev, maxDepth))
+    {
+      if(!device->close())
+      {
+        OUT_ERROR("could not close device!");
+      }
+      delete listenerIrDepth;
+      delete listenerColor;
+      return false;
+    }
+
+    createCameraInfo();
+    initTopics(queueSize, base_name);
+
+    return true;
   }
 
   bool initRegistration(const std::string &method, const int32_t device, const double maxDepth)
@@ -336,8 +341,8 @@ private:
 #ifdef DEPTH_REG_CPU
       reg = DepthRegistration::CPU;
 #else
-      std::cerr << "CPU registration is not available!" << std::endl;
-      return -1;
+      OUT_ERROR("CPU registration is not available!");
+      return false;
 #endif
     }
     else if(method == "opencl")
@@ -345,33 +350,39 @@ private:
 #ifdef DEPTH_REG_OPENCL
       reg = DepthRegistration::OPENCL;
 #else
-      std::cerr << "OpenCL registration is not available!" << std::endl;
-      return -1;
+      OUT_ERROR("OpenCL registration is not available!");
+      return false;
 #endif
     }
     else
     {
-      std::cerr << "Unknown registration method: " << method << std::endl;
+      OUT_ERROR("Unknown registration method: " << method);
       return false;
     }
 
     depthRegLowRes = DepthRegistration::New(reg);
     depthRegHighRes = DepthRegistration::New(reg);
 
-    bool ret = true;
-    ret = ret && depthRegLowRes->init(cameraMatrixLowRes, sizeLowRes, cameraMatrixIr, sizeIr, distortionIr, rotation, translation, 0.5f, maxDepth, device);
-    ret = ret && depthRegHighRes->init(cameraMatrixColor, sizeColor, cameraMatrixIr, sizeIr, distortionIr, rotation, translation, 0.5f, maxDepth, device);
+    if(!depthRegLowRes->init(cameraMatrixLowRes, sizeLowRes, cameraMatrixDepth, sizeIr, distortionDepth, rotation, translation, 0.5f, maxDepth, device) ||
+       !depthRegHighRes->init(cameraMatrixColor, sizeColor, cameraMatrixDepth, sizeIr, distortionDepth, rotation, translation, 0.5f, maxDepth, device))
+    {
+      delete depthRegLowRes;
+      delete depthRegHighRes;
+      return false;
+    }
 
-    return ret;
+    registration = new libfreenect2::Registration(irParams, colorParams);
+
+    return true;
   }
 
-  bool initPipeline(const std::string &method, const int32_t device, const bool bilateral_filter, const bool edge_aware_filter, const double minDepth, const double maxDepth)
+  bool initPipeline(const std::string &method, const int32_t device)
   {
-    ROS_INFO("init pipe 1");
     if(method == "default")
     {
-    ROS_INFO("init pipe default");
-#ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
+#ifdef LIBFREENECT2_WITH_CUDA_SUPPORT
+      packetPipeline = new libfreenect2::CudaPacketPipeline(device);
+#elif defined(LIBFREENECT2_WITH_OPENCL_SUPPORT)
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #elif defined(LIBFREENECT2_WITH_OPENGL_SUPPORT)
       packetPipeline = new libfreenect2::OpenGLPacketPipeline();
@@ -381,44 +392,52 @@ private:
     }
     else if(method == "cpu")
     {
-    ROS_INFO("init pipe cpu");
       packetPipeline = new libfreenect2::CpuPacketPipeline();
+    }
+    else if(method == "cuda")
+    {
+#ifdef LIBFREENECT2_WITH_CUDA_SUPPORT
+      packetPipeline = new libfreenect2::CudaPacketPipeline(device);
+#else
+      OUT_ERROR("Cuda depth processing is not available!");
+      return false;
+#endif
     }
     else if(method == "opencl")
     {
-    ROS_INFO("init pipe opencl");
 #ifdef LIBFREENECT2_WITH_OPENCL_SUPPORT
       packetPipeline = new libfreenect2::OpenCLPacketPipeline(device);
 #else
-      std::cerr << "OpenCL depth processing is not available!" << std::endl;
+      OUT_ERROR("OpenCL depth processing is not available!");
       return false;
 #endif
     }
     else if(method == "opengl")
     {
-    ROS_INFO("init pipe openGl");
 #ifdef LIBFREENECT2_WITH_OPENGL_SUPPORT
       packetPipeline = new libfreenect2::OpenGLPacketPipeline();
 #else
-      std::cerr << "OpenGL depth processing is not available!" << std::endl;
+      OUT_ERROR("OpenGL depth processing is not available!");
       return false;
 #endif
     }
     else
     {
-      std::cerr << "Unknown depth processing method: " << method << std::endl;
+      OUT_ERROR("Unknown depth processing method: " << method);
       return false;
     }
 
-    libfreenect2::DepthPacketProcessor::Config config;
+    return true;
+  }
+
+  void initConfig(const bool bilateral_filter, const bool edge_aware_filter, const double minDepth, const double maxDepth)
+  {
+    libfreenect2::Freenect2Device::Config config;
     config.EnableBilateralFilter = bilateral_filter;
     config.EnableEdgeAwareFilter = edge_aware_filter;
     config.MinDepth = minDepth;
     config.MaxDepth = maxDepth;
-
-    ROS_INFO("init pipe almost done");
-    packetPipeline->getDepthPacketProcessor()->setConfiguration(config);
-    return true;
+    device->setConfiguration(config);
   }
 
   void initCompression(const int32_t jpegQuality, const int32_t pngLevel, const bool use_png)
@@ -435,51 +454,50 @@ private:
     if(use_png)
     {
       compression16BitExt = ".png";
-      compression16BitString = "; png compressed ";
+      compression16BitString = sensor_msgs::image_encodings::TYPE_16UC1 + "; png compressed";
     }
     else
     {
-      compression16BitExt = ".tiff";
-      compression16BitString = "; tiff compressed ";
+      compression16BitExt = ".tif";
+      compression16BitString = sensor_msgs::image_encodings::TYPE_16UC1 + "; tiff compressed";
     }
   }
 
-  void initTopics(const int32_t queueSize)
+  void initTopics(const int32_t queueSize, const std::string &base_name)
   {
     std::vector<std::string> topics(COUNT);
-    topics[IR] = K2_TOPIC_IMAGE_IR;
-    topics[IR_RECT] = K2_TOPIC_RECT_IR;
-    topics[DEPTH] = K2_TOPIC_IMAGE_DEPTH;
-    topics[DEPTH_RECT] = K2_TOPIC_RECT_DEPTH;
-    topics[DEPTH_LORES] = K2_TOPIC_LORES_DEPTH;
-    topics[DEPTH_HIRES] = K2_TOPIC_HIRES_DEPTH;
-    topics[COLOR] = K2_TOPIC_IMAGE_COLOR;
-    topics[COLOR_RECT] = K2_TOPIC_RECT_COLOR;
-    topics[COLOR_LORES] = K2_TOPIC_LORES_COLOR;
-    topics[MONO] = K2_TOPIC_IMAGE_MONO;
-    topics[MONO_RECT] = K2_TOPIC_RECT_MONO;
-    topics[MONO_LORES] = K2_TOPIC_LORES_MONO;
+    topics[IR_SD] = K2_TOPIC_SD K2_TOPIC_IMAGE_IR;
+    topics[IR_SD_RECT] = K2_TOPIC_SD K2_TOPIC_IMAGE_IR K2_TOPIC_IMAGE_RECT;
+
+    topics[DEPTH_SD] = K2_TOPIC_SD K2_TOPIC_IMAGE_DEPTH;
+    topics[DEPTH_SD_RECT] = K2_TOPIC_SD K2_TOPIC_IMAGE_DEPTH K2_TOPIC_IMAGE_RECT;
+    topics[DEPTH_HD] = K2_TOPIC_HD K2_TOPIC_IMAGE_DEPTH K2_TOPIC_IMAGE_RECT;
+    topics[DEPTH_QHD] = K2_TOPIC_QHD K2_TOPIC_IMAGE_DEPTH K2_TOPIC_IMAGE_RECT;
+
+    topics[COLOR_SD_RECT] = K2_TOPIC_SD K2_TOPIC_IMAGE_COLOR K2_TOPIC_IMAGE_RECT;
+
+    topics[COLOR_HD] = K2_TOPIC_HD K2_TOPIC_IMAGE_COLOR;
+    topics[COLOR_HD_RECT] = K2_TOPIC_HD K2_TOPIC_IMAGE_COLOR K2_TOPIC_IMAGE_RECT;
+    topics[COLOR_QHD] = K2_TOPIC_QHD K2_TOPIC_IMAGE_COLOR;
+    topics[COLOR_QHD_RECT] = K2_TOPIC_QHD K2_TOPIC_IMAGE_COLOR K2_TOPIC_IMAGE_RECT;
+
+    topics[MONO_HD] = K2_TOPIC_HD K2_TOPIC_IMAGE_MONO;
+    topics[MONO_HD_RECT] = K2_TOPIC_HD K2_TOPIC_IMAGE_MONO K2_TOPIC_IMAGE_RECT;
+    topics[MONO_QHD] = K2_TOPIC_QHD K2_TOPIC_IMAGE_MONO;
+    topics[MONO_QHD_RECT] = K2_TOPIC_QHD K2_TOPIC_IMAGE_MONO K2_TOPIC_IMAGE_RECT;
 
     imagePubs.resize(COUNT);
     compressedPubs.resize(COUNT);
-    infoPubs.resize(COUNT);
-    infos.resize(COUNT);
+    ros::SubscriberStatusCallback cb = boost::bind(&Kinect2Bridge::callbackStatus, this);
 
-    const std::string base = "/" + ns;
     for(size_t i = 0; i < COUNT; ++i)
     {
-      if(i < DEPTH || i > DEPTH_HIRES)
-      {
-        imagePubs[i] = nh.advertise<sensor_msgs::Image>(base + topics[i] + K2_TOPIC_IMAGE, queueSize);
-        compressedPubs[i] = nh.advertise<sensor_msgs::CompressedImage>(base + topics[i] + K2_TOPIC_RAW + K2_TOPIC_COMPRESSED, queueSize);
-      }
-      else
-      {
-        imagePubs[i] = nh.advertise<sensor_msgs::Image>(base + topics[i] + K2_TOPIC_RAW, queueSize);
-        compressedPubs[i] = nh.advertise<sensor_msgs::CompressedImage>(base + topics[i] + K2_TOPIC_RAW + K2_TOPIC_COMP_DEPTH, queueSize);
-      }
-      infoPubs[i] = nh.advertise<sensor_msgs::CameraInfo>(base + topics[i] + K2_TOPIC_INFO, queueSize);
+      imagePubs[i] = nh.advertise<sensor_msgs::Image>(base_name + topics[i], queueSize, cb, cb);
+      compressedPubs[i] = nh.advertise<sensor_msgs::CompressedImage>(base_name + topics[i] + K2_TOPIC_COMPRESSED, queueSize, cb, cb);
     }
+    infoHDPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_HD + K2_TOPIC_INFO, queueSize, cb, cb);
+    infoQHDPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_QHD + K2_TOPIC_INFO, queueSize, cb, cb);
+    infoIRPub = nh.advertise<sensor_msgs::CameraInfo>(base_name + K2_TOPIC_SD + K2_TOPIC_INFO, queueSize, cb, cb);
   }
 
   bool initDevice(std::string &sensor)
@@ -489,44 +507,28 @@ private:
 
     if(numOfDevs <= 0)
     {
-      std::cerr << "Error: no Kinect2 devices found!" << std::endl;
+      OUT_ERROR("no Kinect2 devices found!");
+      delete packetPipeline;
       return false;
     }
 
-    std::cout << "PHILLLLLLLLLLLLLLLLL:  serial?" << sensor<<std::endl;
     if(sensor.empty())
     {
       sensor = freenect2.getDefaultDeviceSerialNumber();
     }
-    //PHILLLLL  -- add leading zeros to sensor serial number
-    else
-    {
 
-      int length = 12;//the length a serial number muct be
-      int lengthDiff = length - sensor.length();
-      if(lengthDiff >0){
-        std::string zeros = "0";
-        for(int i=1;i<lengthDiff;i++){
-          zeros += "0";
-        }//end for
-       sensor = zeros + sensor;
-      }//end if length >0    
-    }//end else sensor empty
-    //PHILLLL
-   
-    std::cout << "PHILLLLLLLLLLLLLLLLL:  serial2?" << sensor<<std::endl;
-    
-    std::cout << "Kinect2 devices found: " << std::endl;
+    OUT_INFO("Kinect2 devices found: ");
     for(int i = 0; i < numOfDevs; ++i)
     {
       const std::string &s = freenect2.getDeviceSerialNumber(i);
       deviceFound = deviceFound || s == sensor;
-      std::cout << "  " << i << ": " << s << (s == sensor ? " (selected)" : "") << std::endl;
+      OUT_INFO("  " << i << ": " FG_CYAN << s << (s == sensor ? FG_YELLOW " (selected)" : "") << NO_COLOR);
     }
 
     if(!deviceFound)
     {
-      std::cerr << "Error: Device with serial '" << sensor << "' not found!" << std::endl;
+      OUT_ERROR("Device with serial '" << sensor << "' not found!");
+      delete packetPipeline;
       return false;
     }
 
@@ -534,8 +536,8 @@ private:
 
     if(device == 0)
     {
-      std::cout << "no device connected or failure opening the default one!" << std::endl;
-      return -1;
+      OUT_INFO("no device connected or failure opening the default one!");
+      return false;
     }
 
     listenerColor = new libfreenect2::SyncMultiFrameListener(libfreenect2::Frame::Color);
@@ -544,21 +546,35 @@ private:
     device->setColorFrameListener(listenerColor);
     device->setIrAndDepthFrameListener(listenerIrDepth);
 
-    std::cout << std::endl << "starting kinect2" << std::endl << std::endl;
-    device->start();
+    OUT_INFO("starting kinect2");
+    if(!device->start())
+    {
+      OUT_ERROR("could not start device!");
+      delete listenerIrDepth;
+      delete listenerColor;
+      return false;
+    }
 
-    std::cout << std::endl << "device serial: " << sensor << std::endl;
-    std::cout << "device firmware: " << device->getFirmwareVersion() << std::endl;
+    OUT_INFO("device serial: " FG_CYAN << sensor << NO_COLOR);
+    OUT_INFO("device firmware: " FG_CYAN << device->getFirmwareVersion() << NO_COLOR);
 
-    libfreenect2::Freenect2Device::ColorCameraParams colorParams = device->getColorCameraParams();
-    libfreenect2::Freenect2Device::IrCameraParams irParams = device->getIrCameraParams();
+    colorParams = device->getColorCameraParams();
+    irParams = device->getIrCameraParams();
 
-    std::cout << std::endl << "default ir camera parameters: " << std::endl;
-    std::cout << "fx " << irParams.fx << ", fy " << irParams.fy << ", cx " << irParams.cx << ", cy " << irParams.cy << std::endl;
-    std::cout << "k1 " << irParams.k1 << ", k2 " << irParams.k2 << ", p1 " << irParams.p1 << ", p2 " << irParams.p2 << ", k3 " << irParams.k3 << std::endl;
+    if(!device->stop())
+    {
+      OUT_ERROR("could not stop device!");
+      delete listenerIrDepth;
+      delete listenerColor;
+      return false;
+    }
 
-    std::cout << std::endl << "default color camera parameters: " << std::endl;
-    std::cout << "fx " << colorParams.fx << ", fy " << colorParams.fy << ", cx " << colorParams.cx << ", cy " << colorParams.cy << std::endl;
+    OUT_DEBUG("default ir camera parameters: ");
+    OUT_DEBUG("fx: " FG_CYAN << irParams.fx << NO_COLOR ", fy: " FG_CYAN << irParams.fy << NO_COLOR ", cx: " FG_CYAN << irParams.cx << NO_COLOR ", cy: " FG_CYAN << irParams.cy << NO_COLOR);
+    OUT_DEBUG("k1: " FG_CYAN << irParams.k1 << NO_COLOR ", k2: " FG_CYAN << irParams.k2 << NO_COLOR ", p1: " FG_CYAN << irParams.p1 << NO_COLOR ", p2: " FG_CYAN << irParams.p2 << NO_COLOR ", k3: " FG_CYAN << irParams.k3 << NO_COLOR);
+
+    OUT_DEBUG("default color camera parameters: ");
+    OUT_DEBUG("fx: " FG_CYAN << colorParams.fx << NO_COLOR ", fy: " FG_CYAN << colorParams.fy << NO_COLOR ", cx: " FG_CYAN << colorParams.cx << NO_COLOR ", cy: " FG_CYAN << colorParams.cy << NO_COLOR);
 
     cameraMatrixColor = cv::Mat::eye(3, 3, CV_64F);
     distortionColor = cv::Mat::zeros(1, 5, CV_64F);
@@ -584,9 +600,11 @@ private:
     distortionIr.at<double>(0, 3) = irParams.p2;
     distortionIr.at<double>(0, 4) = irParams.k3;
 
+    cameraMatrixDepth = cameraMatrixIr.clone();
+    distortionDepth = distortionIr.clone();
+
     rotation = cv::Mat::eye(3, 3, CV_64F);
     translation = cv::Mat::zeros(3, 1, CV_64F);
-    translation.at<double>(0) = -0.0520;
     return true;
   }
 
@@ -598,22 +616,22 @@ private:
     bool calibDirNotFound = stat(calibPath.c_str(), &fileStat) != 0 || !S_ISDIR(fileStat.st_mode);
     if(calibDirNotFound || !loadCalibrationFile(calibPath + K2_CALIB_COLOR, cameraMatrixColor, distortionColor))
     {
-      std::cerr << "using sensor defaults for color intrinsic parameters." << std::endl;
+      OUT_WARN("using sensor defaults for color intrinsic parameters.");
     }
 
-    if(calibDirNotFound || !loadCalibrationFile(calibPath + K2_CALIB_IR, cameraMatrixIr, distortionIr))
+    if(calibDirNotFound || !loadCalibrationFile(calibPath + K2_CALIB_IR, cameraMatrixDepth, distortionDepth))
     {
-      std::cerr << "using sensor defaults for ir intrinsic parameters." << std::endl;
+      OUT_WARN("using sensor defaults for ir intrinsic parameters.");
     }
 
     if(calibDirNotFound || !loadCalibrationPoseFile(calibPath + K2_CALIB_POSE, rotation, translation))
     {
-      std::cerr << "using defaults for rotation and translation." << std::endl;
+      OUT_WARN("using defaults for rotation and translation.");
     }
 
     if(calibDirNotFound || !loadCalibrationDepthFile(calibPath + K2_CALIB_DEPTH, depthShift))
     {
-      std::cerr << "using defaults for depth shift." << std::endl;
+      OUT_WARN("using defaults for depth shift.");
       depthShift = 0.0;
     }
 
@@ -628,14 +646,16 @@ private:
     cv::initUndistortRectifyMap(cameraMatrixIr, distortionIr, cv::Mat(), cameraMatrixIr, sizeIr, mapType, map1Ir, map2Ir);
     cv::initUndistortRectifyMap(cameraMatrixColor, distortionColor, cv::Mat(), cameraMatrixLowRes, sizeLowRes, mapType, map1LowRes, map2LowRes);
 
-    std::cout << std::endl << "camera parameters used:" << std::endl
-              << "camera matrix color:" << std::endl << cameraMatrixColor << std::endl
-              << "distortion coefficients color:" << std::endl << distortionColor << std::endl
-              << "camera matrix ir:" << std::endl << cameraMatrixIr << std::endl
-              << "distortion coefficients ir:" << std::endl << distortionIr << std::endl
-              << "rotation:" << std::endl << rotation << std::endl
-              << "translation:" << std::endl << translation << std::endl
-              << "depth shift:" << std::endl << depthShift << std::endl << std::endl;
+    OUT_DEBUG("camera parameters used:");
+    OUT_DEBUG("camera matrix color:" FG_CYAN << std::endl << cameraMatrixColor << NO_COLOR);
+    OUT_DEBUG("distortion coefficients color:" FG_CYAN << std::endl << distortionColor << NO_COLOR);
+    OUT_DEBUG("camera matrix ir:" FG_CYAN << std::endl << cameraMatrixIr << NO_COLOR);
+    OUT_DEBUG("distortion coefficients ir:" FG_CYAN << std::endl << distortionIr << NO_COLOR);
+    OUT_DEBUG("camera matrix depth:" FG_CYAN << std::endl << cameraMatrixDepth << NO_COLOR);
+    OUT_DEBUG("distortion coefficients depth:" FG_CYAN << std::endl << distortionDepth << NO_COLOR);
+    OUT_DEBUG("rotation:" FG_CYAN << std::endl << rotation << NO_COLOR);
+    OUT_DEBUG("translation:" FG_CYAN << std::endl << translation << NO_COLOR);
+    OUT_DEBUG("depth shift:" FG_CYAN << std::endl << depthShift << NO_COLOR);
   }
 
   bool loadCalibrationFile(const std::string &filename, cv::Mat &cameraMatrix, cv::Mat &distortion) const
@@ -649,7 +669,7 @@ private:
     }
     else
     {
-      std::cerr << "can't open calibration file: " << filename << std::endl;
+      OUT_ERROR("can't open calibration file: " << filename);
       return false;
     }
     return true;
@@ -666,7 +686,7 @@ private:
     }
     else
     {
-      std::cerr << "can't open calibration pose file: " << filename << std::endl;
+      OUT_ERROR("can't open calibration pose file: " << filename);
       return false;
     }
     return true;
@@ -682,7 +702,7 @@ private:
     }
     else
     {
-      std::cerr << "can't open calibration depth file: " << filename << std::endl;
+      OUT_ERROR("can't open calibration depth file: " << filename);
       return false;
     }
     return true;
@@ -698,21 +718,9 @@ private:
     cameraMatrixIr.copyTo(projIr(cv::Rect(0, 0, 3, 3)));
     cameraMatrixLowRes.copyTo(projLowRes(cv::Rect(0, 0, 3, 3)));
 
-    createCameraInfo(sizeColor, cameraMatrixColor, distortionColor, cv::Mat::eye(3, 3, CV_64F), projColor, infos[COLOR]);
-    createCameraInfo(sizeColor, cameraMatrixColor, distortionColor, cv::Mat::eye(3, 3, CV_64F), projColor, infos[MONO]);
-    createCameraInfo(sizeIr, cameraMatrixIr, distortionIr, cv::Mat::eye(3, 3, CV_64F), projIr, infos[IR]);
-    infos[DEPTH] = infos[IR];
-
-    createCameraInfo(sizeColor, cameraMatrixColor, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projColor, infos[COLOR_RECT]);
-    createCameraInfo(sizeColor, cameraMatrixColor, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projColor, infos[MONO_RECT]);
-    createCameraInfo(sizeIr, cameraMatrixIr, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projIr, infos[IR_RECT]);
-
-    createCameraInfo(sizeIr, cameraMatrixIr, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projIr, infos[DEPTH_RECT]);
-    createCameraInfo(sizeLowRes, cameraMatrixLowRes, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projLowRes, infos[COLOR_LORES]);
-    createCameraInfo(sizeLowRes, cameraMatrixLowRes, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projLowRes, infos[MONO_LORES]);
-    createCameraInfo(sizeLowRes, cameraMatrixLowRes, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projLowRes, infos[DEPTH_LORES]);
-
-    createCameraInfo(sizeColor, cameraMatrixColor, cv::Mat::zeros(1, 5, CV_64F), cv::Mat::eye(3, 3, CV_64F), projColor, infos[DEPTH_HIRES]);
+    createCameraInfo(sizeColor, cameraMatrixColor, distortionColor, cv::Mat::eye(3, 3, CV_64F), projColor, infoHD);
+    createCameraInfo(sizeIr, cameraMatrixIr, distortionIr, cv::Mat::eye(3, 3, CV_64F), projIr, infoIR);
+    createCameraInfo(sizeLowRes, cameraMatrixLowRes, distortionColor, cv::Mat::eye(3, 3, CV_64F), projLowRes, infoQHD);
   }
 
   void createCameraInfo(const cv::Size &size, const cv::Mat &cameraMatrix, const cv::Mat &distortion, const cv::Mat &rotation, const cv::Mat &projection, sensor_msgs::CameraInfo &cameraInfo) const
@@ -747,8 +755,134 @@ private:
     }
   }
 
+  void callbackStatus()
+  {
+    lockStatus.lock();
+    clientConnected = updateStatus();
+    bool error = false;
+
+    if(clientConnected && !deviceActive)
+    {
+      OUT_INFO("client connected. starting device...");
+      if(!device->start())
+      {
+        OUT_ERROR("could not start device!");
+        error = true;
+      }
+      else
+      {
+        deviceActive = true;
+      }
+    }
+    else if(!clientConnected && deviceActive)
+    {
+      OUT_INFO("no clients connected. stopping device...");
+      if(!device->stop())
+      {
+        OUT_ERROR("could not stop device!");
+        error = true;
+      }
+      else
+      {
+        deviceActive = false;
+      }
+    }
+    lockStatus.unlock();
+
+    if(error)
+    {
+      stop();
+    }
+  }
+
+  bool updateStatus()
+  {
+    bool any = false;
+    for(size_t i = 0; i < COUNT; ++i)
+    {
+      Status s = UNSUBCRIBED;
+      if(imagePubs[i].getNumSubscribers() > 0)
+      {
+        s = RAW;
+      }
+      if(compressedPubs[i].getNumSubscribers() > 0)
+      {
+        s = s == RAW ? BOTH : COMPRESSED;
+      }
+
+      status[i] = s;
+      any = any || s != UNSUBCRIBED;
+    }
+    return any || infoHDPub.getNumSubscribers() > 0 || infoQHDPub.getNumSubscribers() > 0 || infoIRPub.getNumSubscribers() > 0;
+  }
+
+  void main()
+  {
+    setThreadName("Controll");
+    OUT_INFO("waiting for clients to connect");
+    double nextFrame = ros::Time::now().toSec() + deltaT;
+    double fpsTime = ros::Time::now().toSec();
+    size_t oldFrameIrDepth = 0, oldFrameColor = 0;
+    nextColor = true;
+    nextIrDepth = true;
+
+    for(; running && ros::ok();)
+    {
+      if(!deviceActive)
+      {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        fpsTime =  ros::Time::now().toSec();
+        nextFrame = fpsTime + deltaT;
+        continue;
+      }
+
+      double now = ros::Time::now().toSec();
+
+      if(now - fpsTime >= 3.0)
+      {
+        fpsTime = now - fpsTime;
+        size_t framesIrDepth = frameIrDepth - oldFrameIrDepth;
+        size_t framesColor = frameColor - oldFrameColor;
+        oldFrameIrDepth = frameIrDepth;
+        oldFrameColor = frameColor;
+
+        lockTime.lock();
+        double tColor = elapsedTimeColor;
+        double tDepth = elapsedTimeIrDepth;
+        elapsedTimeColor = 0;
+        elapsedTimeIrDepth = 0;
+        lockTime.unlock();
+
+        OUT_INFO("depth processing: " FG_YELLOW "~" << (tDepth / framesIrDepth) * 1000 << "ms" NO_COLOR " (~" << framesIrDepth / tDepth << "Hz) publishing rate: " FG_YELLOW "~" << framesIrDepth / fpsTime << "Hz" NO_COLOR);
+        OUT_INFO("color processing: " FG_YELLOW "~" << (tColor / framesColor) * 1000 << "ms" NO_COLOR " (~" << framesColor / tColor << "Hz) publishing rate: " FG_YELLOW "~" << framesColor / fpsTime << "Hz" NO_COLOR);
+        fpsTime = now;
+      }
+
+      if(now >= nextFrame)
+      {
+        nextColor = true;
+        nextIrDepth = true;
+        nextFrame += deltaT;
+      }
+
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+      if(!deviceActive)
+      {
+        oldFrameIrDepth = frameIrDepth;
+        oldFrameColor = frameColor;
+        lockTime.lock();
+        elapsedTimeColor = 0;
+        elapsedTimeIrDepth = 0;
+        lockTime.unlock();
+        continue;
+      }
+    }
+  }
+
   void threadDispatcher(const size_t id)
   {
+    setThreadName("Worker" + std::to_string(id));
     const size_t checkFirst = id % 2;
     bool processedFrame = false;
     int oldNice = nice(0);
@@ -782,8 +916,7 @@ private:
 
       if(!processedFrame)
       {
-        //std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        ros::Duration(.001).sleep();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
       }
     }
   }
@@ -791,35 +924,62 @@ private:
   void receiveIrDepth()
   {
     libfreenect2::FrameMap frames;
-    libfreenect2::Frame *irFrame, *depthFrame;
     cv::Mat depth, ir;
     std_msgs::Header header;
     std::vector<cv::Mat> images(COUNT);
-    std::vector<Status> status(COUNT, UNSUBCRIBED);
+    std::vector<Status> status = this->status;
     size_t frame;
 
     if(!receiveFrames(listenerIrDepth, frames))
     {
+      lockIrDepth.unlock();
       return;
     }
     double now = ros::Time::now().toSec();
 
     header = createHeader(lastDepth, lastColor);
 
-    irFrame = frames[libfreenect2::Frame::Ir];
-    depthFrame = frames[libfreenect2::Frame::Depth];
+    libfreenect2::Frame *irFrame = frames[libfreenect2::Frame::Ir];
+    libfreenect2::Frame *depthFrame = frames[libfreenect2::Frame::Depth];
 
-    ir = cv::Mat(irFrame->height, irFrame->width, CV_32FC1, irFrame->data);
-    depth = cv::Mat(depthFrame->height, depthFrame->width, CV_32FC1, depthFrame->data);
+#if LIBFREENECT2_API_VERSION >= 2
+    if(irFrame->status != 0 || depthFrame->status != 0)
+    {
+      listenerIrDepth->release(frames);
+      lockIrDepth.unlock();
+      running = false;
+      OUT_ERROR("failure in depth packet processor from libfreenect2");
+      return;
+    }
+    if(irFrame->format != libfreenect2::Frame::Float || depthFrame->format != libfreenect2::Frame::Float)
+    {
+      listenerIrDepth->release(frames);
+      lockIrDepth.unlock();
+      running = false;
+      OUT_ERROR("received invalid frame format");
+      return;
+    }
+#endif
 
     frame = frameIrDepth++;
+
+    if(status[COLOR_SD_RECT] || status[DEPTH_SD] || status[DEPTH_SD_RECT] || status[DEPTH_QHD] || status[DEPTH_HD])
+    {
+      cv::Mat(depthFrame->height, depthFrame->width, CV_32FC1, depthFrame->data).copyTo(depth);
+    }
+
+    if(status[IR_SD] || status[IR_SD_RECT])
+    {
+      ir = cv::Mat(irFrame->height, irFrame->width, CV_32FC1, irFrame->data);
+      ir.convertTo(images[IR_SD], CV_16U);
+    }
+
+    listenerIrDepth->release(frames);
     lockIrDepth.unlock();
 
-    updateStatus(status);
-    processIrDepth(ir, depth, images, status);
-    listenerIrDepth->release(frames);
+    processIrDepth(depth, images, status);
 
-    publishImages(images, header, status, frame, pubFrameIrDepth, IR, COLOR);
+    publishImages(images, header, status, frame, pubFrameIrDepth, IR_SD, COLOR_HD);
 
     double elapsed = ros::Time::now().toSec() - now;
     lockTime.lock();
@@ -830,32 +990,76 @@ private:
   void receiveColor()
   {
     libfreenect2::FrameMap frames;
-    libfreenect2::Frame *colorFrame;
-    cv::Mat color;
     std_msgs::Header header;
     std::vector<cv::Mat> images(COUNT);
-    std::vector<Status> status(COUNT, UNSUBCRIBED);
+    std::vector<Status> status = this->status;
     size_t frame;
 
     if(!receiveFrames(listenerColor, frames))
     {
+      lockColor.unlock();
       return;
     }
     double now = ros::Time::now().toSec();
 
     header = createHeader(lastColor, lastDepth);
 
-    colorFrame = frames[libfreenect2::Frame::Color];
-    color = cv::Mat(colorFrame->height, colorFrame->width, CV_8UC3, colorFrame->data);
+    libfreenect2::Frame *colorFrame = frames[libfreenect2::Frame::Color];
+
+#if LIBFREENECT2_API_VERSION >= 2
+    if(colorFrame->status != 0)
+    {
+      listenerColor->release(frames);
+      lockIrDepth.unlock();
+      running = false;
+      OUT_ERROR("failure in rgb packet processor from libfreenect2");
+      return;
+    }
+    if(colorFrame->format != libfreenect2::Frame::BGRX && colorFrame->format != libfreenect2::Frame::RGBX)
+    {
+      listenerColor->release(frames);
+      lockIrDepth.unlock();
+      running = false;
+      OUT_ERROR("received invalid frame format");
+      return;
+    }
+#endif
 
     frame = frameColor++;
+
+    cv::Mat color = cv::Mat(colorFrame->height, colorFrame->width, CV_8UC4, colorFrame->data);
+    if(status[COLOR_SD_RECT])
+    {
+      lockRegSD.lock();
+      memcpy(this->color.data, colorFrame->data, sizeColor.width * sizeColor.height * 4);
+      this->color.format = colorFrame->format;
+      lockRegSD.unlock();
+    }
+    if(status[COLOR_HD] || status[COLOR_HD_RECT] || status[COLOR_QHD] || status[COLOR_QHD_RECT] ||
+       status[MONO_HD] || status[MONO_HD_RECT] || status[MONO_QHD] || status[MONO_QHD_RECT])
+    {
+      cv::Mat tmp;
+      cv::flip(color, tmp, 1);
+#if LIBFREENECT2_API_VERSION >= 2
+      if(colorFrame->format == libfreenect2::Frame::BGRX)
+      {
+        cv::cvtColor(tmp, images[COLOR_HD], CV_BGRA2BGR);
+      }
+      else
+      {
+        cv::cvtColor(tmp, images[COLOR_HD], CV_RGBA2BGR);
+      }
+#else
+      cv::cvtColor(tmp, images[COLOR_HD], CV_BGRA2BGR);
+#endif
+    }
+
+    listenerColor->release(frames);
     lockColor.unlock();
 
-    updateStatus(status);
-    processColor(color, images, status);
-    listenerColor->release(frames);
+    processColor(images, status);
 
-    publishImages(images, header, status, frame, pubFrameColor, COLOR, COUNT);
+    publishImages(images, header, status, frame, pubFrameColor, COLOR_HD, COUNT);
 
     double elapsed = ros::Time::now().toSec() - now;
     lockTime.lock();
@@ -874,7 +1078,7 @@ private:
       newFrames = true;
       listener->waitForNewFrame(frames);
 #endif
-      if(!running || !ros::ok())
+      if(!deviceActive || !running || !ros::ok())
       {
         if(newFrames)
         {
@@ -883,7 +1087,7 @@ private:
         return false;
       }
     }
-    return true;
+    return newFrames;
   }
 
   std_msgs::Header createHeader(ros::Time &last, ros::Time &other)
@@ -904,145 +1108,179 @@ private:
     std_msgs::Header header;
     header.seq = 0;
     header.stamp = timestamp;
-    header.frame_id = K2_TF_RGB_OPT_FRAME;
     return header;
   }
 
-  bool updateStatus(std::vector<Status> &status)
+  void processIrDepth(const cv::Mat &depth, std::vector<cv::Mat> &images, const std::vector<Status> &status)
   {
-    bool any = false;
-    for(size_t i = 0; i < COUNT; ++i)
+    // COLOR registered to depth
+    if(status[COLOR_SD_RECT])
     {
-      Status s = UNSUBCRIBED;
-      if(imagePubs[i].getNumSubscribers() > 0)
+      cv::Mat tmp;
+      libfreenect2::Frame depthFrame(sizeIr.width, sizeIr.height, 4, depth.data);
+      libfreenect2::Frame undistorted(sizeIr.width, sizeIr.height, 4);
+      libfreenect2::Frame registered(sizeIr.width, sizeIr.height, 4);
+      lockRegSD.lock();
+      registration->apply(&color, &depthFrame, &undistorted, &registered);
+      lockRegSD.unlock();
+      cv::flip(cv::Mat(sizeIr, CV_8UC4, registered.data), tmp, 1);
+#if LIBFREENECT2_API_VERSION >= 2
+      if(color.format == libfreenect2::Frame::BGRX)
       {
-        ROS_INFO("NEW SUBSCRIBER");
-        s = RAW;
+        cv::cvtColor(tmp, images[COLOR_SD_RECT], CV_BGRA2BGR);
       }
-      if(compressedPubs[i].getNumSubscribers() > 0)
+      else
       {
-        s = s == RAW ? BOTH : COMPRESSED;
+        cv::cvtColor(tmp, images[COLOR_SD_RECT], CV_RGBA2BGR);
       }
-
-      status[i] = s;
-      any = any || s != UNSUBCRIBED || infoPubs[i].getNumSubscribers() > 0;
+#else
+      cv::cvtColor(tmp, images[COLOR_SD_RECT], CV_BGRA2BGR);
+#endif
     }
-    return any;
-  }
-
-  void processIrDepth(const cv::Mat &ir, const cv::Mat &depth, std::vector<cv::Mat> &images, const std::vector<Status> &status)
-  {
 
     // IR
-    if(status[IR] || status[IR_RECT])
+    if(status[IR_SD] || status[IR_SD_RECT])
     {
-      ir.convertTo(images[IR], CV_16U);
-      cv::flip(images[IR], images[IR], 1);
+      cv::flip(images[IR_SD], images[IR_SD], 1);
     }
-    if(status[IR_RECT])
+    if(status[IR_SD_RECT])
     {
-      cv::remap(images[IR], images[IR_RECT], map1Ir, map2Ir, cv::INTER_AREA);
+      cv::remap(images[IR_SD], images[IR_SD_RECT], map1Ir, map2Ir, cv::INTER_AREA);
     }
 
     // DEPTH
     cv::Mat depthShifted;
-    if(status[DEPTH])
+    if(status[DEPTH_SD])
     {
-      depth.convertTo(images[DEPTH], CV_16U, 1);
-      cv::flip(images[DEPTH], images[DEPTH], 1);
+      depth.convertTo(images[DEPTH_SD], CV_16U, 1);
+      cv::flip(images[DEPTH_SD], images[DEPTH_SD], 1);
     }
-    if(status[DEPTH_RECT] || status[DEPTH_LORES] || status[DEPTH_HIRES])
+    if(status[DEPTH_SD_RECT] || status[DEPTH_QHD] || status[DEPTH_HD])
     {
+      ROS_INFO("UNNECCESARY 1");
       depth.convertTo(depthShifted, CV_16U, 1, depthShift);
       cv::flip(depthShifted, depthShifted, 1);
     }
-    if(status[DEPTH_RECT])
+    if(status[DEPTH_SD_RECT])
     {
-      cv::remap(depthShifted, images[DEPTH_RECT], map1Ir, map2Ir, cv::INTER_NEAREST);
+      ROS_INFO("UNNECCESARY 2");
+      cv::remap(depthShifted, images[DEPTH_SD_RECT], map1Ir, map2Ir, cv::INTER_NEAREST);
     }
-    if(status[DEPTH_LORES])
+    if(status[DEPTH_QHD])
     {
+      ROS_INFO("UNNECCESARY 3");
       lockRegLowRes.lock();
-      depthRegLowRes->registerDepth(depthShifted, images[DEPTH_LORES]);
+      depthRegLowRes->registerDepth(depthShifted, images[DEPTH_QHD]);
       lockRegLowRes.unlock();
     }
-    if(status[DEPTH_HIRES])
+    if(status[DEPTH_HD])
     {
+      ROS_INFO("UNNECCESARY 3");
       lockRegHighRes.lock();
-      depthRegHighRes->registerDepth(depthShifted, images[DEPTH_HIRES]);
+      depthRegHighRes->registerDepth(depthShifted, images[DEPTH_HD]);
       lockRegHighRes.unlock();
     }
   }
 
-  void processColor(const cv::Mat &color, std::vector<cv::Mat> &images, const std::vector<Status> &status)
+  void processColor(std::vector<cv::Mat> &images, const std::vector<Status> &status)
   {
     // COLOR
-    if(status[COLOR] || status[COLOR_RECT] || status[COLOR_LORES] || status[MONO] || status[MONO_RECT] || status[MONO_LORES])
+    if(status[COLOR_HD_RECT] || status[MONO_HD_RECT])
     {
-      cv::flip(color, images[COLOR], 1);
+      cv::remap(images[COLOR_HD], images[COLOR_HD_RECT], map1Color, map2Color, cv::INTER_AREA);
     }
-    if(status[COLOR_RECT] || status[MONO_RECT])
+    if(status[COLOR_QHD] || status[MONO_QHD])
     {
-      cv::remap(images[COLOR], images[COLOR_RECT], map1Color, map2Color, cv::INTER_AREA);
+      cv::resize(images[COLOR_HD], images[COLOR_QHD], sizeLowRes, 0, 0, cv::INTER_AREA);
     }
-    if(status[COLOR_LORES] || status[MONO_LORES])
+    if(status[COLOR_QHD_RECT] || status[MONO_QHD_RECT])
     {
-      cv::remap(images[COLOR], images[COLOR_LORES], map1LowRes, map2LowRes, cv::INTER_AREA);
+      cv::remap(images[COLOR_HD], images[COLOR_QHD_RECT], map1LowRes, map2LowRes, cv::INTER_AREA);
     }
 
     // MONO
-    if(status[MONO])
+    if(status[MONO_HD])
     {
-      cv::cvtColor(images[COLOR], images[MONO], CV_BGR2GRAY);
+      cv::cvtColor(images[COLOR_HD], images[MONO_HD], CV_BGR2GRAY);
     }
-    if(status[MONO_RECT])
+    if(status[MONO_HD_RECT])
     {
-      cv::cvtColor(images[COLOR_RECT], images[MONO_RECT], CV_BGR2GRAY);
+      cv::cvtColor(images[COLOR_HD_RECT], images[MONO_HD_RECT], CV_BGR2GRAY);
     }
-    if(status[MONO_LORES])
+    if(status[MONO_QHD])
     {
-      cv::cvtColor(images[COLOR_LORES], images[MONO_LORES], CV_BGR2GRAY);
+      cv::cvtColor(images[COLOR_QHD], images[MONO_QHD], CV_BGR2GRAY);
+    }
+    if(status[MONO_QHD_RECT])
+    {
+      cv::cvtColor(images[COLOR_QHD_RECT], images[MONO_QHD_RECT], CV_BGR2GRAY);
     }
   }
 
   void publishImages(const std::vector<cv::Mat> &images, const std_msgs::Header &header, const std::vector<Status> &status, const size_t frame, size_t &pubFrame, const size_t begin, const size_t end)
   {
-    std::vector<sensor_msgs::Image> imageMsgs(COUNT);
-    std::vector<sensor_msgs::CompressedImage> compressedMsgs(COUNT);
-    std::vector<sensor_msgs::CameraInfo> infoMsgs(COUNT);
+    std::vector<sensor_msgs::ImagePtr> imageMsgs(COUNT);
+    std::vector<sensor_msgs::CompressedImagePtr> compressedMsgs(COUNT);
+    sensor_msgs::CameraInfoPtr infoHDMsg,  infoQHDMsg,  infoIRMsg;
+    std_msgs::Header _header = header;
+
+    if(begin < COLOR_HD)
+    {
+      _header.frame_id = baseNameTF + K2_TF_IR_OPT_FRAME;
+
+      infoIRMsg = sensor_msgs::CameraInfoPtr(new sensor_msgs::CameraInfo);
+      *infoIRMsg = infoIR;
+      infoIRMsg->header = _header;
+    }
+    else
+    {
+      _header.frame_id = baseNameTF + K2_TF_RGB_OPT_FRAME;
+
+      infoHDMsg = sensor_msgs::CameraInfoPtr(new sensor_msgs::CameraInfo);
+      *infoHDMsg = infoHD;
+      infoHDMsg->header = _header;
+
+      infoQHDMsg = sensor_msgs::CameraInfoPtr(new sensor_msgs::CameraInfo);
+      *infoQHDMsg = infoQHD;
+      infoQHDMsg->header = _header;
+
+    }
 
     for(size_t i = begin; i < end; ++i)
     {
-      infoMsgs[i] = infos[i];
-      infoMsgs[i].header = header;
-      infoMsgs[i].header.frame_id = baseNameTF + (i < DEPTH_LORES ? K2_TF_IR_OPT_FRAME : K2_TF_RGB_OPT_FRAME);
+      if(i < DEPTH_HD || i == COLOR_SD_RECT)
+      {
+        _header.frame_id = baseNameTF + K2_TF_IR_OPT_FRAME;
+      }
+      else
+      {
+        _header.frame_id = baseNameTF + K2_TF_RGB_OPT_FRAME;
+      }
 
       switch(status[i])
       {
       case UNSUBCRIBED:
-        //ROS_ERROR("UN %d",i);
         break;
       case RAW:
-        //ROS_ERROR("RAW %d",i);
-        createImage(images[i], infoMsgs[i].header, Image(i), imageMsgs[i]);
+        imageMsgs[i] = sensor_msgs::ImagePtr(new sensor_msgs::Image);
+        createImage(images[i], _header, Image(i), *imageMsgs[i]);
         break;
       case COMPRESSED:
-        //ROS_ERROR("COMP %d",i);
-        createCompressed(images[i], infoMsgs[i].header, Image(i), compressedMsgs[i]);
+        compressedMsgs[i] = sensor_msgs::CompressedImagePtr(new sensor_msgs::CompressedImage);
+        createCompressed(images[i], _header, Image(i), *compressedMsgs[i]);
         break;
       case BOTH:
-        //ROS_ERROR("BOTH %d",i);
-        createImage(images[i], infoMsgs[i].header, Image(i), imageMsgs[i]);
-        createCompressed(images[i], infoMsgs[i].header, Image(i), compressedMsgs[i]);
+        imageMsgs[i] = sensor_msgs::ImagePtr(new sensor_msgs::Image);
+        compressedMsgs[i] = sensor_msgs::CompressedImagePtr(new sensor_msgs::CompressedImage);
+        createImage(images[i], _header, Image(i), *imageMsgs[i]);
+        createCompressed(images[i], _header, Image(i), *compressedMsgs[i]);
         break;
       }
-        //ROS_ERROR("NONE %d",i);
     }
 
     while(frame != pubFrame)
     {
-      //std::this_thread::sleep_for(std::chrono::microseconds(100));
-      ros::Duration(.001).sleep();
+      std::this_thread::sleep_for(std::chrono::microseconds(100));
     }
     lockPub.lock();
     for(size_t i = begin; i < end; ++i)
@@ -1050,26 +1288,39 @@ private:
       switch(status[i])
       {
       case UNSUBCRIBED:
-        if(infoPubs[i].getNumSubscribers() > 0)
-        {
-          infoPubs[i].publish(infoMsgs[i]);
-        }
         break;
       case RAW:
         imagePubs[i].publish(imageMsgs[i]);
-        infoPubs[i].publish(infoMsgs[i]);
         break;
       case COMPRESSED:
         compressedPubs[i].publish(compressedMsgs[i]);
-        infoPubs[i].publish(infoMsgs[i]);
         break;
       case BOTH:
         imagePubs[i].publish(imageMsgs[i]);
         compressedPubs[i].publish(compressedMsgs[i]);
-        infoPubs[i].publish(infoMsgs[i]);
         break;
       }
     }
+
+    if(begin < COLOR_HD)
+    {
+      if(infoIRPub.getNumSubscribers() > 0)
+      {
+        infoIRPub.publish(infoIRMsg);
+      }
+    }
+    else
+    {
+      if(infoHDPub.getNumSubscribers() > 0)
+      {
+        infoHDPub.publish(infoHDMsg);
+      }
+      if(infoQHDPub.getNumSubscribers() > 0)
+      {
+        infoQHDPub.publish(infoQHDMsg);
+      }
+    }
+
     ++pubFrame;
     lockPub.unlock();
   }
@@ -1082,25 +1333,26 @@ private:
 
     switch(type)
     {
-    case IR:
-    case IR_RECT:
+    case IR_SD:
+    case IR_SD_RECT:
+    case DEPTH_SD:
+    case DEPTH_SD_RECT:
+    case DEPTH_HD:
+    case DEPTH_QHD:
       msgImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
       break;
-    case DEPTH:
-    case DEPTH_RECT:
-    case DEPTH_LORES:
-    case DEPTH_HIRES:
-      msgImage.encoding = sensor_msgs::image_encodings::TYPE_16UC1;
-      break;
-    case COLOR:
-    case COLOR_RECT:
-    case COLOR_LORES:
+    case COLOR_SD_RECT:
+    case COLOR_HD:
+    case COLOR_HD_RECT:
+    case COLOR_QHD:
+    case COLOR_QHD_RECT:
       msgImage.encoding = sensor_msgs::image_encodings::BGR8;
       break;
-    case MONO:
-    case MONO_RECT:
-    case MONO_LORES:
-      msgImage.encoding = sensor_msgs::image_encodings::MONO8;
+    case MONO_HD:
+    case MONO_HD_RECT:
+    case MONO_QHD:
+    case MONO_QHD_RECT:
+      msgImage.encoding = sensor_msgs::image_encodings::TYPE_8UC1;
       break;
     case COUNT:
       return;
@@ -1121,40 +1373,29 @@ private:
 
     switch(type)
     {
-    case IR:
-    case IR_RECT:
-      msgImage.format = sensor_msgs::image_encodings::TYPE_16UC1 + compression16BitString;
+    case IR_SD:
+    case IR_SD_RECT:
+    case DEPTH_SD:
+    case DEPTH_SD_RECT:
+    case DEPTH_HD:
+    case DEPTH_QHD:
+      msgImage.format = compression16BitString;
       cv::imencode(compression16BitExt, image, msgImage.data, compressionParams);
       break;
-    case DEPTH:
-    case DEPTH_RECT:
-    case DEPTH_LORES:
-    case DEPTH_HIRES:
-      {
-        compressed_depth_image_transport::ConfigHeader compressionConfig;
-        const size_t headerSize = sizeof(compressed_depth_image_transport::ConfigHeader);
-        compressionConfig.format = compressed_depth_image_transport::INV_DEPTH;
-
-        std::vector<uint8_t> data;
-        msgImage.format = sensor_msgs::image_encodings::TYPE_16UC1 + "; compressedDepth";
-        cv::imencode(compression16BitExt, image, data, compressionParams);
-
-        msgImage.data.resize(headerSize + data.size());
-        memcpy(&msgImage.data[0], &compressionConfig, headerSize);
-        memcpy(&msgImage.data[headerSize], &data[0], data.size());
-        break;
-      }
-    case COLOR:
-    case COLOR_RECT:
-    case COLOR_LORES:
+    case COLOR_SD_RECT:
+    case COLOR_HD:
+    case COLOR_HD_RECT:
+    case COLOR_QHD:
+    case COLOR_QHD_RECT:
       msgImage.format = sensor_msgs::image_encodings::BGR8 + "; jpeg compressed bgr8";
       cv::imencode(".jpg", image, msgImage.data, compressionParams);
       break;
-    case MONO:
-    case MONO_RECT:
-    case MONO_LORES:
-      msgImage.format = sensor_msgs::image_encodings::MONO8 + "; png compressed ";
-      cv::imencode(".png", image, msgImage.data, compressionParams);
+    case MONO_HD:
+    case MONO_HD_RECT:
+    case MONO_QHD:
+    case MONO_QHD_RECT:
+      msgImage.format = sensor_msgs::image_encodings::TYPE_8UC1 + "; jpeg compressed ";
+      cv::imencode(".jpg", image, msgImage.data, compressionParams);
       break;
     case COUNT:
       return;
@@ -1163,50 +1404,50 @@ private:
 
   void publishStaticTF()
   {
+    setThreadName("TFPublisher");
     tf::TransformBroadcaster broadcaster;
-    tf::StampedTransform stColor, stColorOpt, stIr, stIrOpt;
+    tf::StampedTransform stColorOpt, stIrOpt;
     ros::Time now = ros::Time::now();
 
     tf::Matrix3x3 rot(rotation.at<double>(0, 0), rotation.at<double>(0, 1), rotation.at<double>(0, 2),
                       rotation.at<double>(1, 0), rotation.at<double>(1, 1), rotation.at<double>(1, 2),
                       rotation.at<double>(2, 0), rotation.at<double>(2, 1), rotation.at<double>(2, 2));
-    rot = rot.inverse();
 
-    tf::Quaternion qZero, qOpt;
+    tf::Quaternion qZero;
     qZero.setRPY(0, 0, 0);
-    qOpt.setRPY(-M_PI_2, 0, -M_PI_2);
-    tf::Vector3 trans(translation.at<double>(2), -translation.at<double>(0), -translation.at<double>(1));
+    tf::Vector3 trans(translation.at<double>(0), translation.at<double>(1), translation.at<double>(2));
     tf::Vector3 vZero(0, 0, 0);
-    tf::Transform tIr(rot, trans), tOpt(qOpt, vZero), tZero(qZero, vZero);
+    tf::Transform tIr(rot, trans), tZero(qZero, vZero);
 
-    stColor = tf::StampedTransform(tZero, now, baseNameTF + K2_TF_LINK, baseNameTF + K2_TF_RGB_FRAME);
-    stIr = tf::StampedTransform(tIr, now, baseNameTF + K2_TF_LINK, baseNameTF + K2_TF_IR_FRAME);
-    stColorOpt = tf::StampedTransform(tOpt, now, baseNameTF + K2_TF_RGB_FRAME, baseNameTF + K2_TF_RGB_OPT_FRAME);
-    stIrOpt = tf::StampedTransform(tOpt, now, baseNameTF + K2_TF_IR_FRAME, baseNameTF + K2_TF_IR_OPT_FRAME);
+    stColorOpt = tf::StampedTransform(tZero, now, baseNameTF + K2_TF_LINK, baseNameTF + K2_TF_RGB_OPT_FRAME);
+    stIrOpt = tf::StampedTransform(tIr, now, baseNameTF + K2_TF_RGB_OPT_FRAME, baseNameTF + K2_TF_IR_OPT_FRAME);
 
     for(; running && ros::ok();)
     {
       now = ros::Time::now();
-      stColor.stamp_ = now;
       stColorOpt.stamp_ = now;
-      stIr.stamp_ = now;
       stIrOpt.stamp_ = now;
 
-      broadcaster.sendTransform(stColor);
       broadcaster.sendTransform(stColorOpt);
-      broadcaster.sendTransform(stIr);
       broadcaster.sendTransform(stIrOpt);
 
-      //std::this_thread::sleep_for(std::chrono::milliseconds(10));
-      ros::Duration(.001).sleep();
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
+  }
+
+  static inline void setThreadName(const std::string &name)
+  {
+#if defined(__linux__)
+    prctl(PR_SET_NAME, name.c_str());
+#elif defined(__APPLE__)
+    pthread_setname_np(name.c_str());
+#endif
   }
 };
 
 class Kinect2BridgeNodelet : public nodelet::Nodelet
 {
 private:
-  std::thread kinect2BridgeThread;
   Kinect2Bridge *pKinect2Bridge;
 
 public:
@@ -1219,21 +1460,19 @@ public:
     if(pKinect2Bridge)
     {
       pKinect2Bridge->stop();
-      kinect2BridgeThread.join();
       delete pKinect2Bridge;
     }
   }
 
   virtual void onInit()
   {
-    kinect2BridgeThread = std::thread(&Kinect2BridgeNodelet::runKinect2Brigde, this);
-  }
-
-private:
-  void runKinect2Brigde()
-  {
-    pKinect2Bridge = new Kinect2Bridge(getPrivateNodeHandle());
-    pKinect2Bridge->run();
+    pKinect2Bridge = new Kinect2Bridge(getNodeHandle(), getPrivateNodeHandle());
+    if(!pKinect2Bridge->start())
+    {
+      delete pKinect2Bridge;
+      pKinect2Bridge = NULL;
+      throw nodelet::Exception("Could not start kinect2_bridge!");
+    }
   }
 };
 
@@ -1242,9 +1481,9 @@ PLUGINLIB_EXPORT_CLASS(Kinect2BridgeNodelet, nodelet::Nodelet)
 
 void helpOption(const std::string &name, const std::string &stype, const std::string &value, const std::string &desc)
 {
-  std::cout  << '_' << name << ":=<" << stype << '>' << std::endl
-             << "    default: " << value << std::endl
-             << "    info:    " << desc << std::endl;
+  std::cout << FG_GREEN "_" << name << NO_COLOR ":=" FG_YELLOW "<" << stype << ">" NO_COLOR << std::endl
+            << "    default: " FG_CYAN << value << NO_COLOR << std::endl
+            << "    info:    " << desc << std::endl;
 }
 
 void help(const std::string &path)
@@ -1262,6 +1501,10 @@ void help(const std::string &path)
   depthMethods += ", opencl";
   depthDefault = "opencl";
 #endif
+#ifdef LIBFREENECT2_WITH_CUDA_SUPPORT
+  depthMethods += ", cuda";
+  depthDefault = "cuda";
+#endif
 #ifdef DEPTH_REG_CPU
   regMethods += ", cpu";
 #endif
@@ -1270,7 +1513,7 @@ void help(const std::string &path)
   regDefault = "opencl";
 #endif
 
-  std::cout << path << " [_options:=value]" << std::endl;
+  std::cout << path << FG_BLUE " [_options:=value]" << std::endl;
   helpOption("base_name",         "string", K2_DEFAULT_NS,  "set base name for all topics");
   helpOption("sensor",            "double", "-1.0",         "serial of the sensor to use");
   helpOption("fps_limit",         "double", "-1.0",         "limit the frames per second");
@@ -1281,7 +1524,7 @@ void help(const std::string &path)
   helpOption("depth_method",      "string", depthDefault,   "Use specific depth processing: " + depthMethods);
   helpOption("depth_device",      "int",    "-1",           "openCL device to use for depth processing");
   helpOption("reg_method",        "string", regDefault,     "Use specific depth registration: " + regMethods);
-  helpOption("reg_devive",        "int",    "-1",           "openCL device to use for depth registration");
+  helpOption("reg_device",        "int",    "-1",           "openCL device to use for depth registration");
   helpOption("max_depth",         "double", "12.0",         "max depth value");
   helpOption("min_depth",         "double", "0.1",          "min depth value");
   helpOption("queue_size",        "int",    "2",            "queue size of publisher");
@@ -1294,8 +1537,18 @@ void help(const std::string &path)
 
 int main(int argc, char **argv)
 {
+#if EXTENDED_OUTPUT
+  ROSCONSOLE_AUTOINIT;
+  if(!getenv("ROSCONSOLE_FORMAT"))
+  {
+    ros::console::g_formatter.tokens_.clear();
+    ros::console::g_formatter.init("[${severity}] ${message}");
+  }
+#endif
+
   ros::init(argc, argv, "kinect2_bridge", ros::init_options::AnonymousName);
-  for(int argI = 1; argI < argc; ++ argI)
+
+  for(int argI = 1; argI < argc; ++argI)
   {
     std::string arg(argv[argI]);
 
@@ -1307,20 +1560,24 @@ int main(int argc, char **argv)
     }
     else
     {
-      std::cerr << "Unknown argument: " << arg << std::endl;
+      OUT_ERROR("Unknown argument: " << arg);
       return -1;
     }
   }
 
   if(!ros::ok())
   {
-    std::cerr << "ros::ok failed!" << std::endl;
+    OUT_ERROR("ros::ok failed!");
     return -1;
   }
 
   Kinect2Bridge kinect2;
+  if(kinect2.start())
+  {
+    ros::spin();
 
-  kinect2.run();
+    kinect2.stop();
+  }
 
   ros::shutdown();
   return 0;
